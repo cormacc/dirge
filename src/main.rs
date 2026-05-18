@@ -172,41 +172,6 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "plugin")]
     {
-        let mut mgr = plugin_manager.lock().unwrap();
-
-        // Always load the bundled workflow plugin
-        let builtin = include_str!("../plugins/workflow.janet");
-        match mgr.eval(builtin) {
-            Ok(_) => {
-                let hook_names = [
-                    "on-init",
-                    "on-prompt",
-                    "on-response",
-                    "on-tool-start",
-                    "on-tool-end",
-                    "on-error",
-                    "on-complete",
-                ];
-                let mut registered = 0u32;
-                for hook in &hook_names {
-                    let fn_name = format!("workflow-{}", hook);
-                    let check = format!("(bound? '{})", fn_name);
-                    if mgr.eval(&check).map(|v| v == "true").unwrap_or(false) {
-                        mgr.register(hook, &fn_name);
-                        registered += 1;
-                    }
-                }
-                eprintln!(
-                    "loaded builtin workflow plugin, {} hook(s) registered",
-                    registered
-                );
-            }
-            Err(e) => {
-                eprintln!("warning: failed to load builtin workflow plugin: {}", e);
-            }
-        }
-
-        // Also load user plugins from filesystem
         use std::path::PathBuf;
         let hook_names = [
             "on-init",
@@ -225,57 +190,46 @@ async fn main() -> anyhow::Result<()> {
                 .join("plugins"),
             PathBuf::from(".dirge").join("plugins"),
         ];
-        let mut loaded = 0u32;
-        let mut registered = 0u32;
+
         for dir in &search_dirs {
-            match std::fs::read_dir(dir) {
-                Ok(entries) => {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().map_or(false, |e| e == "janet") {
-                            match mgr.load_file(&path) {
-                                Ok(()) => {
-                                    loaded += 1;
-                                    let stem = path
-                                        .file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("unknown");
-                                    for hook in &hook_names {
-                                        let fn_name = format!("{}-{}", stem, hook);
-                                        let check = format!("(bound? '{})", fn_name);
-                                        if mgr.eval(&check).map(|v| v == "true").unwrap_or(false) {
-                                            mgr.register(hook, &fn_name);
-                                            registered += 1;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "warning: failed to load plugin {}: {}",
-                                        path.display(),
-                                        e
-                                    );
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("plugin dir not found: {}", dir.display());
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("warning: cannot read plugin dir {}: {}", dir.display(), e);
+                    continue;
+                }
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "janet") {
+                    eprintln!("loading plugin: {}", path.display());
+                    let mut mgr = plugin_manager.lock().unwrap();
+                    match mgr.load_file(&path) {
+                        Ok(()) => {
+                            let stem = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown");
+                            for hook in &hook_names {
+                                let fn_name = format!("{}-{}", stem, hook);
+                                let check = format!("(bound? '{})", fn_name);
+                                if mgr.eval(&check).map(|v| v == "true").unwrap_or(false) {
+                                    mgr.register(hook, &fn_name);
+                                    eprintln!("  registered hook: {} -> {}", hook, fn_name);
                                 }
                             }
                         }
-                    }
-                }
-                Err(e) => {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        eprintln!(
-                            "warning: plugin dir not readable ({}): {}",
-                            dir.display(),
-                            e
-                        );
+                        Err(e) => {
+                            eprintln!("warning: failed to load plugin {}: {}", path.display(), e);
+                        }
                     }
                 }
             }
-        }
-        if loaded > 0 {
-            eprintln!(
-                "loaded {} user plugin(s), {} hook(s) registered",
-                loaded, registered
-            );
         }
     }
 
