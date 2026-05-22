@@ -556,49 +556,66 @@ steering injection visible in the loop (already proven by
 
 **Risk**: low.
 
-##### 4.5h-6 — Opt-in routing via `--use-agent-loop` flag
+##### 4.5h-6 — Direct cutover: replace old path with new
 
-**Goal**: a CLI flag (and config field) that routes
-`provider::spawn_runner` through `spawn_loop_runner` instead
-of `runner::spawn_agent`. Both paths coexist; default stays
-the old path. Returns the existing `AgentRunner` shape so UI
-callsites don't change.
+**SCOPE NOTE**: Earlier draft introduced a `--use-agent-loop`
+flag for migration safety. Reverted to match pi's "one path"
+shape — pi has no flag, never had a legacy path. Dirge's
+cutover is one commit replacing the rig multi-turn internals
+of `provider::spawn_runner`, deleting `runner::run_stream`,
+matching pi semantically.
+
+**Goal**: replace the rig multi-turn dispatch inside
+`provider::spawn_runner` with `spawn_loop_runner`. Delete
+the now-dead `runner::run_stream` + recovery loop. Keep
+`AgentRunner` shape so UI callsites don't change.
 
 **Approach**:
-- Add `AnyAgent::spawn_runner_via_loop(prompt, history) ->
-  AgentRunner` that composes 4.5h-2 (StreamFn) + 4.5h-3
-  (chunk timeout) + 4.5h-4 (LoopTool registry) + 4.5h-5
-  (steering + notifications) and adapts the resulting
-  `LoopRunner` to the `AgentRunner` shape (signal → interject_tx
-  semantics)
-- Add `dirge_config::Config.use_agent_loop: bool`
-- Add `--use-agent-loop` CLI flag
-- `provider::spawn_runner` branches on the flag
+- Add `AnyAgent::spawn_runner` internals that compose 4.5h-2
+  (StreamFn) + 4.5h-3 (chunk timeout) + 4.5h-4 (LoopTool
+  registry) + 4.5h-5 (steering + notifications)
+- Adapt the resulting `LoopRunner` to the `AgentRunner` shape
+  (signal → interject_tx semantics) via an
+  `into_agent_runner()` helper or equivalent
+- DELETE `runner::run_stream` (~600 LOC) and the recovery
+  retry loop in `spawn_agent`
+- Keep `runner::convert_history` and `runner::spawn_agent`'s
+  public signature — internals fully rewritten
+- Remove the `agent-loop` feature gate from `Cargo.toml`
+- Remove `#![allow(dead_code)]` + `#![allow(unused_imports)]`
+  module-level allows in `src/agent/agent_loop/mod.rs`
 
 **Files**:
-- `src/provider.rs` — `spawn_runner_via_loop` + branch in
-  `spawn_runner`
-- `src/config/mod.rs` — flag field
-- `src/main.rs` — CLI arg parsing
+- `src/provider.rs` — internals only; signature preserved
+- `src/agent/runner.rs` — strip multi-turn path
+- `Cargo.toml` — remove `agent-loop = []`
+- `src/agent/agent_loop/mod.rs` — drop module-level allows
 - `src/agent/agent_loop/integration.rs` —
-  `LoopRunner::into_agent_runner()` adapter or equivalent
+  `LoopRunner::into_agent_runner()` adapter
 
-**Tests**: integration test that runs a canned multi-turn
-scenario through BOTH paths and asserts the AgentEvent
-streams match in structure (event kinds, ordering, key
-fields). Diff between paths is allowed only in known-okay
-fields (e.g. cost/tokens which old path tracks and new
-doesn't yet).
+**Tests**: existing tests for the new path are the parity
+proof. An additional integration test that exercises the
+full `spawn_runner → AgentEvent stream` path through the new
+internals catches any glue bugs. The 724 default tests must
+still pass (existing UI/ACP/tool tests; they were never
+coupled to the old path's internals).
 
-**Risk**: high. First time the new path touches real dirge
-state. Expected friction: signal semantics differing
-between paths; chamber rendering state; ACP-specific event
-massaging.
+**Risk**: HIGH. First contact with real dirge state. Expected
+friction:
+- signal vs interject_tx semantics (graceful-stop at tool
+  result vs immediate cancel)
+- chamber rendering state assumptions
+- ACP-specific event massaging
+- background notification timing
+- session.add_message timing
+
+Fix forward — no fallback path. h-7 (manual provider testing)
+catches what runs through to actual LLMs.
 
 ##### 4.5h-7 — Real-provider smoke testing (manual)
 
 **Goal**: validate the new path against actual Anthropic /
-OpenAI / OpenRouter accounts before deletion is safe.
+OpenAI / OpenRouter accounts.
 
 **Test scenarios**:
 1. Simple Q (no tools)
@@ -611,60 +628,33 @@ OpenAI / OpenRouter accounts before deletion is safe.
 
 **Files**: none structural. Bug-fix commits land as discovered.
 
-**Approach**: user runs `dirge --use-agent-loop` against
-configured providers; we iterate on bugs. May reveal missing
-features that earlier phases overlooked (e.g. specific
-provider quirks, ACP edge cases).
+**Approach**: user runs `dirge` against configured providers
+(the new path is the only path after h-6 — no flag to set);
+we iterate on bugs. May reveal missing features that earlier
+phases overlooked (e.g. specific provider quirks, ACP edge
+cases).
 
 **Risk**: high — unknown unknowns are most likely to surface
-here. Multi-session, requires API keys.
-
-##### 4.5h-8 — Flip default; delete old path
-
-**Goal**: make the new loop the only path. Final commit.
-
-**Approach**:
-- Default `use_agent_loop = true` (or delete the flag)
-- `provider::spawn_runner` calls `spawn_runner_via_loop`
-  unconditionally
-- Delete `runner::run_stream` + the recovery loop in
-  `spawn_agent` (~600 LOC removed)
-- Remove the `agent-loop` feature gate from `Cargo.toml`
-- Remove the `#![allow(dead_code)]` + `#![allow(unused_imports)]`
-  module-level allows in `src/agent/agent_loop/mod.rs`
-- Audit for any remaining references to the old path
-  (`convert_history` is still useful — kept; runner-specific
-  helpers go)
-
-**Files**:
-- `src/agent/runner.rs` — strip multi-turn path
-- `src/provider.rs` — remove the branch
-- `Cargo.toml` — remove `agent-loop = []`
-- `src/agent/agent_loop/mod.rs` — drop module-level allows
-
-**Tests**: all default tests still pass.
-
-**Risk**: medium. Deletion. By this point 4.5h-7 has validated
-parity; the deletion is mostly mechanical.
+here. Multi-session, requires API keys. Fix-forward
+discipline: each bug found gets a focused commit.
 
 ---
 
 **Estimated sizes** (rough LOC + new tests per sub-phase):
 
-| Sub-phase | LOC | Tests | Cumulative state                                    |
-|-----------|-----|-------|----------------------------------------------------|
-| 4.5h-2    | 80  | 1-2   | StreamFn buildable from any provider               |
-| 4.5h-3    | 100 | 3-4   | + Chunk timeout enforced                           |
-| 4.5h-4    | 120 | 2-3   | + Full tool registry available as LoopTools        |
-| 4.5h-5    | 60  | 2     | + Background notifications + steering plumbed     |
-| 4.5h-6    | 250 | 4-6   | + Opt-in routing; parity-tested                    |
-| 4.5h-7    | ~50 | n/a   | + Real-provider verified (bug-fix commits)         |
-| 4.5h-8    | -600 + 50 | 0 net | New path is the only path                  |
+| Sub-phase | LOC      | Tests | Cumulative state                            |
+|-----------|----------|-------|---------------------------------------------|
+| 4.5h-2    | 80       | 1-2   | StreamFn buildable from any provider        |
+| 4.5h-3    | 100      | 3-4   | + Chunk timeout enforced                    |
+| 4.5h-4    | 120      | 2-3   | + Full tool registry available as LoopTools |
+| 4.5h-5    | 60       | 2     | + Background notifications + steering       |
+| 4.5h-6    | -600 +250| 3-5   | New path replaces old; pi-shape achieved    |
+| 4.5h-7    | bug fixes| n/a   | Real-provider verified                      |
 
 Each sub-phase ships green CI + a concrete user-visible step
-forward. Phases h-2 through h-5 are technically reorderable
-since they're mutually independent; the listed order is the
-risk-ascending one.
+forward. Phases h-2 through h-5 are mutually independent and
+reorderable. h-6 is the cutover; h-7 is the manual
+verification gate.
 
 ---
 
