@@ -2060,6 +2060,16 @@ impl PluginManager {
         self.drain_newline_blob("harness-followup-messages")
     }
 
+    /// Drain the `harness-custom-messages` blob — UI-only
+    /// notification text. Pushed by plugins via
+    /// `harness/add-custom-message`. The loop emits these as
+    /// `LoopMessage::Custom`; the bridge renders them in the
+    /// chat without sending to the LLM (`convert_to_llm`
+    /// drops non-LLM roles).
+    pub fn drain_custom_messages(&mut self) -> Vec<String> {
+        self.drain_newline_blob("harness-custom-messages")
+    }
+
     /// Shared body for `drain_*_messages` — read the slot's
     /// string contents, split on newline, filter empty entries,
     /// clear the slot to `""`.

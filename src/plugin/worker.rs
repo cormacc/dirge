@@ -153,6 +153,23 @@ const HARNESS_INIT: &str = r#"
     (set harness-followup-messages
          (string harness-followup-messages content "\n"))))
 
+# Custom (UI-only) message queue. Plugins call
+# (harness/add-custom-message "build started") to push a
+# notification that the user SEES in the chat but the model
+# does NOT see in its context. Pi semantics: any message variant
+# other than user/assistant/toolResult is filtered out by
+# `convertToLlm`. We make this explicit with a dedicated
+# `LoopMessage::Custom` variant; the UI renders it; convert_to_llm
+# drops it before the LLM sees it.
+#
+# Drained per turn boundary alongside steering messages so the
+# UI sees them in order.
+(var harness-custom-messages "")
+(defn harness/add-custom-message [content]
+  (when (string? content)
+    (set harness-custom-messages
+         (string harness-custom-messages content "\n"))))
+
 # Slash-command registry. Plugins register at load time;
 # the host reads the list once after all plugins load and
 # dispatches matching /cmd input back to the named handler.

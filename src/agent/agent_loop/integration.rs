@@ -368,7 +368,7 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
     // silence the warning otherwise.
     #[cfg_attr(not(feature = "plugin"), allow(unused_mut))]
     let mut loop_config = LoopConfig {
-        convert_to_llm: passthrough_converter(),
+        convert_to_llm: default_convert_to_llm(),
         transform_context: None,
         get_api_key: None,
         api_key: None,
@@ -537,8 +537,31 @@ fn loop_message_to_value(msg: &LoopMessage) -> Value {
 /// `Message` type for the real-LLM path. For tests with mock
 /// streams, the stream_fn doesn't actually consume the messages
 /// — passthrough is fine.
-fn passthrough_converter() -> super::types::ConvertToLlmFn {
-    Arc::new(|messages: &[Value]| messages.to_vec())
+/// Phase 7: default `convertToLlm` that keeps only LLM-bound
+/// messages (user / assistant / toolResult) and drops everything
+/// else. Pi's contract is that `convertToLlm` is the "filter to
+/// what the model can see" step — custom message variants (UI
+/// notifications, artifacts, plugin events) are dropped here so
+/// they don't pollute the LLM context.
+///
+/// Renamed from `passthrough_converter` (phase 4.5f placeholder).
+/// The earlier passthrough let LoopMessage::Custom values reach
+/// the LLM verbatim, breaking pi parity. Custom messages
+/// serialize through `loop_message_to_value` to whatever Value
+/// shape the application chose; if they used role="user" they
+/// slipped through. The filter here enforces the role-based
+/// contract.
+pub fn default_convert_to_llm() -> super::types::ConvertToLlmFn {
+    Arc::new(|messages: &[Value]| {
+        messages
+            .iter()
+            .filter(|m| {
+                let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                matches!(role, "user" | "assistant" | "toolResult" | "system")
+            })
+            .cloned()
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -828,5 +851,81 @@ mod tests {
             AgentEvent::TurnEnd { .. } => "TurnEnd",
             AgentEvent::Interjected { .. } => "Interjected",
         }
+    }
+
+    /// Phase 7: `default_convert_to_llm` filters `role="custom"`
+    /// messages out of the LlmContext.messages before the
+    /// StreamFn sees them. Custom variants appear in the
+    /// transcript (Context.messages) for UI rendering but never
+    /// reach the LLM.
+    ///
+    /// Setup: Pre-load history with a mix of user / assistant /
+    /// custom messages. Run the loop; the stream factory
+    /// captures what its LlmContext.messages contains. Assert
+    /// the custom variants are absent.
+    #[tokio::test]
+    async fn default_convert_to_llm_filters_custom_messages() {
+        use std::sync::Mutex;
+        // Custom message intermixed with normal history.
+        let history = vec![
+            LoopMessage::User(UserMessage {
+                content: "first user".to_string(),
+            }),
+            LoopMessage::Custom(serde_json::json!({
+                "role": "custom",
+                "content": "UI-only notification",
+            })),
+            LoopMessage::Assistant(AssistantMessage::new(
+                vec![ContentBlock::Text {
+                    text: "first answer".to_string(),
+                }],
+                StopReason::Stop,
+            )),
+        ];
+
+        let observed: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let observed_clone = observed.clone();
+        let stream_fn: StreamFn = Arc::new(move |ctx, _opts| {
+            *observed_clone.lock().unwrap() = ctx.messages.clone();
+            let msg = AssistantMessage::new(
+                vec![ContentBlock::Text {
+                    text: "done".to_string(),
+                }],
+                StopReason::Stop,
+            );
+            Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+                reason: StopReason::Stop,
+                message: msg,
+            }]))
+        });
+
+        let mut cfg = LoopSpawnConfig::minimal(stream_fn, "next turn please");
+        cfg.history = history;
+        let runner = spawn_loop_runner(cfg);
+        let _ = drain(runner.event_rx).await;
+        let _ = runner.task.await;
+
+        let seen = observed.lock().unwrap().clone();
+        // Stream factory observed messages. Custom should be
+        // FILTERED — only user/assistant remain.
+        let roles: Vec<String> = seen
+            .iter()
+            .map(|m| {
+                m.get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("?")
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            !roles.contains(&"custom".to_string()),
+            "Custom messages must be filtered before the LLM; got roles: {roles:?}"
+        );
+        // user + assistant + new user prompt = 3 (custom dropped).
+        assert_eq!(
+            roles.len(),
+            3,
+            "expected 3 LLM-visible messages; got {roles:?}"
+        );
     }
 }

@@ -286,25 +286,46 @@ pub fn should_stop_after_turn_from_plugin_manager(
     })
 }
 
-/// Build a `GetSteeringMessagesFn` that drains the plugin's
-/// `harness-steering-messages` queue. Plugins call
-/// `harness/add-steering` to inject mid-run user turns.
+/// Build a `GetSteeringMessagesFn` that drains BOTH the plugin's
+/// `harness-steering-messages` queue (becomes
+/// `LoopMessage::User`) AND the `harness-custom-messages`
+/// queue (becomes `LoopMessage::Custom` — UI-only, filtered
+/// from the LLM by `default_convert_to_llm`).
 ///
-/// Returns a (possibly empty) Vec of `LoopMessage::User`s.
+/// Pi semantics: custom messages are application-defined
+/// variants that appear in the transcript / UI but are
+/// dropped by `convertToLlm` before reaching the model.
+/// Drained at the same turn boundary as steering so the UI
+/// sees them in plugin-add order.
+///
+/// Returns interleaved `User` and `Custom` messages in the
+/// order they were added (steering first, then custom).
 pub fn get_steering_messages_from_plugin_manager(
     pm: Arc<Mutex<PluginManager>>,
 ) -> GetSteeringMessagesFn {
     Arc::new(move || {
         let pm = pm.clone();
         Box::pin(async move {
-            let drained: Vec<String> = {
+            let (steering, custom): (Vec<String>, Vec<String>) = {
                 let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
-                mgr.drain_steering_messages()
+                (mgr.drain_steering_messages(), mgr.drain_custom_messages())
             };
-            drained
-                .into_iter()
-                .map(|content| LoopMessage::User(UserMessage { content }))
-                .collect()
+            let mut out: Vec<LoopMessage> = Vec::with_capacity(steering.len() + custom.len());
+            for content in steering {
+                out.push(LoopMessage::User(UserMessage { content }));
+            }
+            for content in custom {
+                // Custom-shaped Value carries role="custom"
+                // so default_convert_to_llm filters it out.
+                // The UI bridge can dispatch on
+                // LoopEvent::MessageStart { Custom } to
+                // render notifications differently.
+                out.push(LoopMessage::Custom(serde_json::json!({
+                    "role": "custom",
+                    "content": content,
+                })));
+            }
+            out
         })
     })
 }
@@ -723,6 +744,46 @@ mod tests {
         // Critical: the UI's end-of-run consumer can still read it.
         let pending = pm.lock().unwrap().take_pending_next_model();
         assert_eq!(pending, Some("gpt-5".to_string()));
+    }
+
+    /// Phase 7: plugin pushes a custom message via
+    /// `harness/add-custom-message`; the steering hook returns
+    /// it as `LoopMessage::Custom` (not User). The Custom
+    /// variant gets filtered by `default_convert_to_llm` before
+    /// reaching the LLM but still appears in the UI transcript.
+    #[tokio::test]
+    async fn get_steering_messages_separates_user_and_custom() {
+        let Some(pm) = try_pm() else { return };
+        {
+            let mut mgr = pm.lock().unwrap();
+            mgr.eval(
+                r#"(defn add [_ctx]
+                     (harness/add-steering "real user input")
+                     (harness/add-custom-message "build started"))"#,
+            )
+            .unwrap();
+            mgr.register("on-tool-end", "add");
+            mgr.dispatch_tool_hook("on-tool-end", "@{:tool \"t\" :output \"x\"}")
+                .unwrap();
+        }
+        let hook = get_steering_messages_from_plugin_manager(pm);
+        let messages = hook().await;
+        // Two messages — User first, then Custom.
+        assert_eq!(messages.len(), 2);
+        match &messages[0] {
+            LoopMessage::User(u) => assert_eq!(u.content, "real user input"),
+            other => panic!("expected User; got {other:?}"),
+        }
+        match &messages[1] {
+            LoopMessage::Custom(v) => {
+                assert_eq!(v.get("role").and_then(|r| r.as_str()), Some("custom"));
+                assert_eq!(
+                    v.get("content").and_then(|c| c.as_str()),
+                    Some("build started"),
+                );
+            }
+            other => panic!("expected Custom; got {other:?}"),
+        }
     }
 
     /// Unknown thinking-level strings get filtered out — a

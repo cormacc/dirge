@@ -51,8 +51,8 @@ pub use hooks::{
     ShouldStopAfterTurnFn, TurnHookContext,
 };
 pub use integration::{
-    LoopRunner, LoopSpawnConfig, rig_history_system_prompt, rig_history_to_loop_messages,
-    rig_message_to_loop_messages, spawn_loop_runner,
+    LoopRunner, LoopSpawnConfig, default_convert_to_llm, rig_history_system_prompt,
+    rig_history_to_loop_messages, rig_message_to_loop_messages, spawn_loop_runner,
 };
 pub use message::{
     AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason, StreamEvent,
