@@ -29,6 +29,7 @@ pub mod message;
 #[cfg(feature = "plugin")]
 pub mod plugin_hooks;
 pub mod result;
+pub mod retry;
 pub mod rig_stream;
 pub mod rig_stream_factory;
 pub mod rig_tool;
@@ -53,6 +54,7 @@ pub use message::{
 #[cfg(feature = "plugin")]
 pub use plugin_hooks::{after_hook_from_plugin_manager, before_hook_from_plugin_manager};
 pub use result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
+pub use retry::retrying_stream_fn;
 pub use rig_stream::{wrap_rig_stream, wrap_streamed_assistant};
 pub use rig_stream_factory::{
     loop_tool_to_rig_definition, rig_stream_fn_from_model, value_to_rig_message,

@@ -9,6 +9,7 @@ pub enum ErrorKind {
     Other,
 }
 
+#[derive(Debug, Clone)]
 pub struct RecoveryPolicy {
     max_retries: usize,
     backoff_base: Duration,
