@@ -158,6 +158,15 @@ async fn run_prompt(
     let model = client.completion_model(model_str.to_string());
 
     let (permission, ask_tx) = build_acp_permission(state);
+    // Adversarial-review finding #2: ACP used to build its checker
+    // and never install the active prompt's `deny_tools` list. Plan
+    // mode (or any frontmatter deny) was a no-op for editor-side
+    // clients — the LLM could edit/write/bash unrestricted even
+    // though the prompt forbade it. Mirror the
+    // `main.rs::build_channels`-followed-by-`apply_prompt_deny`
+    // sequence here so ACP sessions get the same permission model
+    // as the interactive UI.
+    crate::permission::apply_prompt_deny(&permission, &state.context.current_prompt_deny_tools);
     let sandbox = Sandbox::new(state.cli.resolve_sandbox(&state.cfg));
 
     // Audit H16: ACP path used to pass `None` for `bg_store`, so the

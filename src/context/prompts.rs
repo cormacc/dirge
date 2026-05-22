@@ -79,12 +79,19 @@ fn parse_frontmatter(raw: &str) -> Prompt {
         match key {
             "deny_tools" => {
                 // Inline list form: `[a, b, c]`. Tolerant of spaces.
+                // Adversarial-review #7: lowercase tool names so a
+                // prompt that says `deny_tools: [Edit]` correctly
+                // denies the tool registered as `edit`. The match
+                // inside `is_prompt_denied` is already case-insensitive
+                // but normalising at parse time also makes
+                // `current_prompt_deny_tools` consistent everywhere
+                // it's surfaced (e.g. status line, /prompt UI).
                 let stripped = value.trim_start_matches('[').trim_end_matches(']');
                 deny_tools = stripped
                     .split(',')
                     .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\''))
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
+                    .map(|s| s.to_lowercase())
                     .collect();
             }
             "description" => {
@@ -121,6 +128,61 @@ pub fn global_prompts_dir() -> PathBuf {
 /// blocks below MUST stay in this order — swapping them would
 /// silently invert precedence. New tiers (e.g. workspace-scoped)
 /// should slot in by precedence with the same soft-then-hard pattern.
+/// Tool names recognised by the registry. Used at prompt-load time
+/// to warn when a `.md`'s frontmatter `deny_tools` references an
+/// unknown tool — a typo like `[apply-patch]` (hyphen) or
+/// `[search]` (not a tool) would otherwise silently be a no-op.
+/// Adversarial-review #9 added.
+const KNOWN_TOOLS: &[&str] = &[
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "grep",
+    "find_files",
+    "glob",
+    "list_dir",
+    "write_todo_list",
+    "apply_patch",
+    "lsp",
+    "question",
+    "webfetch",
+    "websearch",
+    "task",
+    "task_status",
+    "memory",
+    "skill",
+    "list_symbols",
+    "get_symbol_body",
+    "find_definition",
+    "find_callers",
+    "find_callees",
+    "repo_overview",
+    "plan_enter",
+    "plan_exit",
+    "mcp_tool",
+];
+
+fn warn_unknown_deny_tools(prompt_name: &str, deny: &[String]) {
+    for t in deny {
+        if !KNOWN_TOOLS.iter().any(|k| k.eq_ignore_ascii_case(t)) {
+            // Could be an MCP-registered tool name (e.g. "edit_file"
+            // from an MCP server we don't statically know about) or
+            // a typo. We can't distinguish without the registry at
+            // load time, so just warn — better to surface a benign
+            // hit than to silently fail closed.
+            eprintln!(
+                "warning: prompt '{}' deny_tools entry {:?} doesn't match any known built-in. \
+                 If this is an MCP tool name, ignore this warning; if it's a typo, fix the .md. \
+                 Known tools: {}",
+                prompt_name,
+                t,
+                KNOWN_TOOLS.join(", "),
+            );
+        }
+    }
+}
+
 pub fn load() -> HashMap<String, Prompt> {
     let mut prompts: HashMap<String, Prompt> = HashMap::new();
 
@@ -162,6 +224,15 @@ pub fn load() -> HashMap<String, Prompt> {
             {
                 prompts.insert(name.to_string(), parse_frontmatter(&content));
             }
+        }
+    }
+
+    // Warn once per prompt about unknown tool names in deny_tools.
+    // Done after the full merge so a global-prompt override of an
+    // embedded prompt is checked too.
+    for (name, p) in &prompts {
+        if !p.deny_tools.is_empty() {
+            warn_unknown_deny_tools(name, &p.deny_tools);
         }
     }
 

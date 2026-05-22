@@ -256,9 +256,14 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         });
 
         let plan_tools = plan_tx.map(|tx| {
+            // Pass the PermCheck to the plan tools so they can
+            // consult the prompt deny-list before opening the
+            // confirmation dialog (adversarial-review #6).
             let enter =
-                Box::new(tools::PlanEnterTool::new(tx.clone())) as Box<dyn rig::tool::ToolDyn>;
-            let exit = Box::new(tools::PlanExitTool::new(tx)) as Box<dyn rig::tool::ToolDyn>;
+                Box::new(tools::PlanEnterTool::new(tx.clone()).with_permission(permission.clone()))
+                    as Box<dyn rig::tool::ToolDyn>;
+            let exit = Box::new(tools::PlanExitTool::new(tx).with_permission(permission.clone()))
+                as Box<dyn rig::tool::ToolDyn>;
             vec![enter, exit]
         });
 

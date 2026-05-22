@@ -99,6 +99,9 @@ impl PermissionChecker {
             ("grep", &config.grep),
             ("find_files", &config.find_files),
             ("list_dir", &config.list_dir),
+            // Adversarial-review #5 added; both are read-only walkers.
+            ("glob", &config.glob),
+            ("repo_overview", &config.repo_overview),
             ("write_todo_list", &config.write_todo_list),
             ("apply_patch", &config.apply_patch),
             ("lsp", &config.lsp),
@@ -182,9 +185,22 @@ impl PermissionChecker {
 
     /// Returns true when `tool` is in the active prompt's
     /// `deny_tools` frontmatter list. Internal helper so both
-    /// `check` and `check_path` share the same gate.
+    /// `check` and `check_path` share the same gate. Case-insensitive
+    /// match (#7 fix): `deny_tools: [Edit]` correctly denies `edit`.
     fn is_prompt_denied(&self, tool: &str) -> bool {
-        self.prompt_deny_tools.iter().any(|t| t == tool)
+        self.prompt_deny_tools
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(tool))
+    }
+
+    /// Public deny-list probe, used by code paths that route through
+    /// `check_perm` with a UMBRELLA tool name (e.g. MCP tools always
+    /// pass `"mcp_tool"`) and need to additionally check the
+    /// CONCRETE name the LLM would think of (e.g. an MCP-exported
+    /// `edit` should be blocked if the active prompt denies `edit`).
+    /// Returns true if ANY of the supplied names hits the deny-list.
+    pub fn any_prompt_denied(&self, names: &[&str]) -> bool {
+        names.iter().any(|n| self.is_prompt_denied(n))
     }
 
     pub fn check(&mut self, tool: &str, input: &str) -> CheckResult {
@@ -718,6 +734,49 @@ mod tests {
                 ));
             }
         }
+    }
+
+    /// Adversarial-review #1: the deny-list match must also fire for
+    /// the umbrella `mcp_tool` name and the qualified `mcp_tool:srv:name`
+    /// form, since MCP tools route through `check_perm("mcp_tool", …)`.
+    /// `any_prompt_denied` is the API the MCP wrapper uses; pin its
+    /// behavior here so a refactor can't silently re-open the bypass.
+    #[test]
+    fn prompt_deny_any_matches_concrete_and_qualified_mcp_names() {
+        let mut checker = fresh_checker();
+        // Plan-mode-style deny list.
+        checker.set_prompt_deny_tools(vec!["edit".to_string(), "write".to_string()]);
+        // Concrete MCP tool name matches.
+        assert!(checker.any_prompt_denied(&["edit", "mcp_tool:fs:edit", "mcp_tool"]));
+        // Umbrella match too.
+        checker.set_prompt_deny_tools(vec!["mcp_tool".to_string()]);
+        assert!(checker.any_prompt_denied(&["whatever", "mcp_tool:any:any", "mcp_tool"]));
+        // Qualified-only deny.
+        checker.set_prompt_deny_tools(vec!["mcp_tool:fs:write_file".to_string()]);
+        assert!(checker.any_prompt_denied(&["write_file", "mcp_tool:fs:write_file", "mcp_tool"]));
+        assert!(!checker.any_prompt_denied(&[
+            "write_file",
+            "mcp_tool:other:write_file",
+            "mcp_tool:fs:write_other"
+        ]));
+    }
+
+    /// Adversarial-review #7: case-insensitive deny-list. A prompt
+    /// that says `deny_tools: [Edit]` must deny the tool registered
+    /// as `edit`. (Frontmatter parser also lowercases at load, but
+    /// pin the matcher-side guarantee here too.)
+    #[test]
+    fn prompt_deny_is_case_insensitive() {
+        let mut checker = fresh_checker();
+        checker.set_prompt_deny_tools(vec!["Edit".to_string(), "BASH".to_string()]);
+        assert!(matches!(
+            checker.check("edit", "foo"),
+            CheckResult::Denied(_)
+        ));
+        assert!(matches!(
+            checker.check("bash", "ls"),
+            CheckResult::Denied(_)
+        ));
     }
 
     /// Empty deny list is a no-op — back to normal rule eval.

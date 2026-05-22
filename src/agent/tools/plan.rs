@@ -4,9 +4,32 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::tools::ToolError;
+use crate::permission::checker::PermCheck;
 
 pub type PlanSwitchSender = mpsc::Sender<PlanSwitchRequest>;
 pub type PlanSwitchReceiver = mpsc::Receiver<PlanSwitchRequest>;
+
+/// Refuse the call if the active prompt's `deny_tools` list names
+/// this plan tool. Lets a prompt author say `deny_tools: [plan_exit]`
+/// to lock the LLM into plan mode for the whole turn (adversarial-
+/// review #6). Returns Ok if no deny-list match.
+fn check_prompt_deny(perm: &Option<PermCheck>, tool_name: &str) -> Result<(), ToolError> {
+    let Some(p) = perm else {
+        return Ok(());
+    };
+    let denied = {
+        let guard = p.lock().unwrap_or_else(|e| e.into_inner());
+        guard.any_prompt_denied(&[tool_name])
+    };
+    if denied {
+        Err(ToolError::Msg(format!(
+            "Tool {:?} is denied by the active prompt's `deny_tools` frontmatter.",
+            tool_name,
+        )))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub struct PlanSwitchRequest {
@@ -30,11 +53,20 @@ pub enum PlanSwitchResponse {
 
 pub struct PlanEnterTool {
     plan_tx: PlanSwitchSender,
+    permission: Option<PermCheck>,
 }
 
 impl PlanEnterTool {
     pub fn new(plan_tx: PlanSwitchSender) -> Self {
-        Self { plan_tx }
+        Self {
+            plan_tx,
+            permission: None,
+        }
+    }
+
+    pub fn with_permission(mut self, perm: Option<PermCheck>) -> Self {
+        self.permission = perm;
+        self
     }
 }
 
@@ -68,6 +100,12 @@ impl Tool for PlanEnterTool {
         // switch via `PlanSwitchResponse`. Routing through `check_perm`
         // would double-ask. This matches how `harness/confirm` works
         // in the plugin layer.
+        //
+        // Adversarial-review #6: still consult the prompt deny-list
+        // before opening the dialog. A prompt that denies plan_enter
+        // (e.g. a strict mode that wants to block mode-switches)
+        // should fail fast without prompting the user.
+        check_prompt_deny(&self.permission, "plan_enter")?;
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.plan_tx
@@ -94,11 +132,20 @@ impl Tool for PlanEnterTool {
 
 pub struct PlanExitTool {
     plan_tx: PlanSwitchSender,
+    permission: Option<PermCheck>,
 }
 
 impl PlanExitTool {
     pub fn new(plan_tx: PlanSwitchSender) -> Self {
-        Self { plan_tx }
+        Self {
+            plan_tx,
+            permission: None,
+        }
+    }
+
+    pub fn with_permission(mut self, perm: Option<PermCheck>) -> Self {
+        self.permission = perm;
+        self
     }
 }
 
@@ -126,6 +173,10 @@ impl Tool for PlanExitTool {
     }
 
     async fn call(&self, _args: PlanExitArgs) -> Result<String, ToolError> {
+        // Adversarial-review #6: respect prompt deny-list. A locked-
+        // in plan-mode session can declare `deny_tools: [plan_exit]`
+        // to block the LLM from mode-switching away.
+        check_prompt_deny(&self.permission, "plan_exit")?;
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.plan_tx

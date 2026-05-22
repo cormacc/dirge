@@ -69,6 +69,28 @@ impl ToolDyn for McpTool {
         let ask_tx = self.ask_tx.clone();
 
         Box::pin(async move {
+            // Adversarial-review finding #1: MCP tools pass the
+            // umbrella name `"mcp_tool"` to `check_perm`, which
+            // means a prompt's `deny_tools: [edit]` would NOT match
+            // an MCP server's `edit` tool — the literal string
+            // comparison inside `is_prompt_denied` never sees the
+            // concrete name. Probe explicitly for the concrete
+            // name, the qualified `mcp_tool:server:name` form, and
+            // the umbrella `mcp_tool`; any match denies before the
+            // call leaves dirge.
+            if let Some(perm) = permission.as_ref() {
+                let qualified = format!("mcp_tool:{}:{}", server_name, tool_name);
+                let denied = {
+                    let guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.any_prompt_denied(&[tool_name.as_str(), qualified.as_str(), "mcp_tool"])
+                };
+                if denied {
+                    return Err(ToolError::ToolCallError(Box::new(McpToolError(format!(
+                        "MCP tool {}::{} is denied by the active prompt's `deny_tools` frontmatter. Switch with `/prompt <other>` to use it.",
+                        server_name, tool_name,
+                    )))));
+                }
+            }
             let perm_key = format!("mcp_tool:{server_name}:{tool_name}");
             check_perm(&permission, &ask_tx, "mcp_tool", &perm_key)
                 .await

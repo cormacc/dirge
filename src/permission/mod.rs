@@ -43,6 +43,15 @@ pub struct PermissionConfig {
     pub grep: Option<ToolPerm>,
     pub find_files: Option<ToolPerm>,
     pub list_dir: Option<ToolPerm>,
+    /// `glob` — fast filename matcher. Read-only filesystem walker;
+    /// per-pattern rules let users restrict which paths the LLM can
+    /// glob (e.g. allow only project root, deny `/etc/*`). Adversarial-
+    /// review #5 added.
+    pub glob: Option<ToolPerm>,
+    /// `repo_overview` — structural codebase map. Read-only walker;
+    /// per-pattern rules can restrict which roots it can summarize.
+    /// Adversarial-review #5 added.
+    pub repo_overview: Option<ToolPerm>,
     pub write_todo_list: Option<ToolPerm>,
     /// `apply_patch` — bulk multi-file patch tool. Mutates the
     /// filesystem like `write`/`edit`; deserves per-pattern rules.

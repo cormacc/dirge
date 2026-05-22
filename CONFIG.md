@@ -149,6 +149,31 @@ adds a default Exa Web Search MCP server at `https://mcp.exa.ai/mcp` with the
 `x-api-key` header set to `EXA_API_KEY` when that environment variable is set.
 Set `"mcp_servers": {}` to disable all MCP servers.
 
+### MCP tools and prompt deny-lists
+
+Per-prompt `deny_tools` frontmatter (see "Prompt restrictions" below) applies
+to MCP tools too. The deny gate matches against three names for each MCP tool
+call:
+
+- the raw tool name as exported by the MCP server (e.g. `edit`, `write_file`),
+- the qualified `mcp_tool:<server>:<name>`,
+- the umbrella `mcp_tool` (denies every MCP tool from every server).
+
+So a plan-mode prompt that ships `deny_tools: [edit, write, apply_patch, bash]`
+also blocks any MCP server that exports a tool named `edit` / `write` /
+`apply_patch` / `bash`. Use `mcp_tool` as a blanket deny when in doubt about
+what an MCP server might expose.
+
+## Plugin trust boundary
+
+The Janet plugin system runs INSIDE the trust boundary. Plugin hooks
+(`on-tool-start`, `on-tool-end`) can mutate tool inputs, block tool calls,
+and replace tool outputs with arbitrary text. They cannot, however, bypass
+the permission checker (`check_perm*` runs inside the inner tool, after the
+plugin pre-hook). If you load third-party plugins, treat them with the same
+care you'd give to executing third-party code in your shell — the plugin's
+trust level effectively equals the user's. There is no sandboxing.
+
 ## Environment variables
 
 | Variable | Purpose |
