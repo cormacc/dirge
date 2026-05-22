@@ -422,6 +422,7 @@ impl LanguageAdapter for CppAdapter {
             exports,
             warnings,
             mtime: std::time::SystemTime::now(),
+            size: 0,
         })
     }
 

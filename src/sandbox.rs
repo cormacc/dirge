@@ -7,16 +7,33 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(enabled: bool) -> Self {
-        if enabled && !Self::bwrap_available() {
-            eprintln!(
-                "warning: --sandbox is enabled but `bwrap` is not in PATH.\n  \
-                 Install bubblewrap (apt install bubblewrap / dnf install bubblewrap /\n  \
-                 pacman -S bubblewrap) or remove the sandbox flag. Bash commands will\n  \
-                 fail with a confusing 'No such file or directory' error until bwrap is\n  \
-                 installed."
-            );
+        // Audit M8: previously this only emitted a warning then
+        // proceeded; the very next bash tool call would error with
+        // a cryptic "No such file or directory" pointing at bwrap.
+        // Now: if --sandbox is on but bwrap is missing, auto-DISABLE
+        // the sandbox with a loud stderr explanation. Bash still
+        // works (unsandboxed) instead of every command failing —
+        // safer default than the prior "looks enabled, silently
+        // broken" state. Users who want hard-fail-on-missing-bwrap
+        // can run `which bwrap && dirge --sandbox …` from a wrapper.
+        let effective_enabled = if enabled {
+            if Self::bwrap_available() {
+                true
+            } else {
+                eprintln!(
+                    "warning: --sandbox requested but `bwrap` is not in PATH.\n  \
+                     Sandbox is DISABLED for this run — bash will execute unsandboxed.\n  \
+                     Install bubblewrap (apt install bubblewrap / dnf install bubblewrap /\n  \
+                     pacman -S bubblewrap) and re-run with --sandbox to enable isolation."
+                );
+                false
+            }
+        } else {
+            false
+        };
+        Sandbox {
+            enabled: effective_enabled,
         }
-        Sandbox { enabled }
     }
 
     /// Check whether `bwrap` is on the user's PATH. Used at construction

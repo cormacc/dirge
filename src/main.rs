@@ -487,9 +487,45 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Audit C2: resolve `--api-key-file` / `--api-key-stdin` before
+    // falling back to `--api-key`. The flag-based key is still
+    // accepted for backward compat but the explicit warning in
+    // `resolve_api_key` fires when it's used. Mutually-exclusive
+    // checks: stdin OR file, never both.
+    if cli.api_key_stdin && cli.api_key_file.is_some() {
+        anyhow::bail!("--api-key-stdin and --api-key-file are mutually exclusive");
+    }
+    if cli.api_key.is_some() && !cli.api_key.as_deref().unwrap_or("").is_empty() {
+        eprintln!(
+            "warning: --api-key value is visible in process listings (/proc/*/cmdline, `ps`). Prefer --api-key-file <path>, --api-key-stdin, or the provider's env var."
+        );
+    }
+    let resolved_key: Option<String> = if let Some(path) = &cli.api_key_file {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("--api-key-file: read {:?}: {}", path, e))?;
+        let key = raw.trim().to_string();
+        if key.is_empty() {
+            anyhow::bail!("--api-key-file: file {:?} is empty after trimming", path);
+        }
+        Some(key)
+    } else if cli.api_key_stdin {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| anyhow::anyhow!("--api-key-stdin: read: {}", e))?;
+        let key = buf.trim().to_string();
+        if key.is_empty() {
+            anyhow::bail!("--api-key-stdin: received empty input");
+        }
+        Some(key)
+    } else {
+        cli.api_key.clone()
+    };
+
     let client = provider::create_client(
         &provider,
-        cli.api_key.as_deref(),
+        resolved_key.as_deref(),
         &cfg.custom_providers_map(),
     )?;
 

@@ -420,6 +420,7 @@ impl LanguageAdapter for RustAdapter {
             exports,
             warnings,
             mtime: std::time::SystemTime::now(),
+            size: 0,
         })
     }
 

@@ -362,6 +362,7 @@ impl LanguageAdapter for ClojureAdapter {
             exports,
             warnings,
             mtime: std::time::SystemTime::now(),
+            size: 0,
         })
     }
 

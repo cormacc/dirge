@@ -95,4 +95,13 @@ pub struct ExtractedFile {
     pub exports: Vec<String>,
     pub warnings: Vec<String>,
     pub mtime: std::time::SystemTime,
+    /// File size captured at extract time, combined with `mtime` to
+    /// validate cache freshness. Audit C5+M7: mtime alone is
+    /// insufficient on 1-second-granularity filesystems (HFS+,
+    /// FAT, some NFS exports) — a same-second write after the
+    /// cache fill produces an identical mtime and the stale cached
+    /// extract is served. Size catches almost every real edit
+    /// (anything but a same-size in-place patch) without the cost
+    /// of hashing the whole file.
+    pub size: u64,
 }

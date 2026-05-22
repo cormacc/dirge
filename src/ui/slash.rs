@@ -167,6 +167,28 @@ pub async fn handle_compress(
     let summary_tokens_est = crate::session::Session::estimate_tokens(&summary);
     let net_saved: i64 = tokens_before as i64 - summary_tokens_est as i64;
 
+    // Audit M9: previously the summary was installed via
+    // `compress_reporting` BEFORE the net-saved check, so an
+    // oversized summary still landed in the session — we only
+    // told the user *afterwards*. Refuse to install when the
+    // summary would cost more than the messages it replaces; the
+    // user can adjust `keep_recent_tokens` / their compress prompt
+    // and re-issue. Skipping the install also avoids polluting the
+    // session-tree with a node we'd want to revert.
+    if net_saved < 0 {
+        renderer.write_line(
+            &format!(
+                "compress aborted — summary ({}t) is LARGER than the {} messages it would replace ({}t); net cost +{}t. Compression rejected. Consider lowering keep_recent_tokens or refining compress instructions, then re-run /compress.",
+                summary_tokens_est,
+                cut_idx,
+                tokens_before,
+                -net_saved,
+            ),
+            c_error(),
+        )?;
+        return Ok(());
+    }
+
     // `compress_reporting` returns the count of non-active-path
     // tree nodes (sibling branches) pruned. We notify the user
     // about that loss explicitly — without the notification a
@@ -211,22 +233,10 @@ pub async fn handle_compress(
             c_error(),
         )?;
     }
-    if net_saved < 0 {
-        // Summary cost more than the messages it replaced. Surface
-        // visibly so the user knows the compress didn't help —
-        // suggests tightening `keep_recent_tokens` or editing the
-        // compress instructions.
-        renderer.write_line(
-            &format!(
-                "compressed {} messages but the summary ({}t) is LARGER than the replaced messages ({}t); net cost +{}t. Consider lowering keep_recent_tokens or refining compress instructions.",
-                cut_idx,
-                summary_tokens_est,
-                tokens_before,
-                -net_saved,
-            ),
-            c_error(),
-        )?;
-    } else {
+    // Net-saved is guaranteed non-negative here: the early-return
+    // above (audit M9) aborts the compress when the summary would
+    // cost more than the messages it replaced.
+    {
         renderer.write_line(
             &format!(
                 "compressed {} messages (saved ~{} tokens; summary uses {}t)",

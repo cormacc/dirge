@@ -349,6 +349,7 @@ impl LanguageAdapter for CAdapter {
             exports,
             warnings,
             mtime: std::time::SystemTime::now(),
+            size: 0,
         })
     }
 

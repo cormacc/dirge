@@ -104,11 +104,20 @@ struct BrokenState {
 
 impl BrokenState {
     /// Backoff window for the current attempt count.
-    /// 1st failure → 10s, 2nd → 20s, 3rd → 40s … capped at 10 min.
+    /// 1st failure → 1s, 2nd → 2s, 3rd → 4s … capped at 10 min.
     /// Reads "have we waited long enough to retry yet?"
+    ///
+    /// Audit C4: was 10s initial which felt sluggish for transient
+    /// crashes (LSP server segfault on a malformed parse, OOM
+    /// while loading a fresh worktree) — the user expected
+    /// diagnostics back within seconds, not tens of seconds. 1s
+    /// initial recovers fast; if the server is genuinely broken
+    /// (uninstalled binary, persistent config error) the
+    /// exponential growth still hits the 10-min cap within ~10
+    /// failures and stops thrashing.
     fn backoff(&self) -> std::time::Duration {
-        let exp = self.attempts.saturating_sub(1).min(6);
-        std::time::Duration::from_secs(10u64 << exp).min(std::time::Duration::from_secs(600))
+        let exp = self.attempts.saturating_sub(1).min(10);
+        std::time::Duration::from_secs(1u64 << exp).min(std::time::Duration::from_secs(600))
     }
 
     /// True while we're still inside the backoff window.
@@ -967,7 +976,8 @@ mod tests {
             2,
             "backoff expired — should attempt respawn",
         );
-        // Attempt count should now be 2, so backoff doubles to 20s.
+        // Attempt count should now be 2, so backoff doubles to 2s
+        // (audit C4 retuned initial from 10s → 1s; 2nd attempt = 2s).
         {
             let state = manager.state.lock().unwrap();
             let key = (root_canon, "rust".to_string());
@@ -975,7 +985,7 @@ mod tests {
             assert_eq!(entry.attempts, 2, "attempts must escalate");
             assert_eq!(
                 entry.backoff(),
-                std::time::Duration::from_secs(20),
+                std::time::Duration::from_secs(2),
                 "backoff escalates exponentially",
             );
         }

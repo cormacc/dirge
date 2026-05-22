@@ -194,10 +194,11 @@ fn resolve_api_key(
     cli_key: Option<&str>,
 ) -> anyhow::Result<String> {
     if let Some(key) = cli_key.filter(|k| !k.is_empty()) {
-        tracing::warn!(
-            "API key provided via --api-key is visible in process listings (/proc/*/cmdline). Use the {} environment variable instead.",
-            provider_env_var(kind)
-        );
+        // Audit C2: the `/proc/*/cmdline` warning now fires at the
+        // call site in main.rs where we know which CLI source the
+        // key came from. File-sourced and stdin-sourced keys end up
+        // here too but those paths don't appear in argv, so no
+        // warning is wanted.
         return Ok(key.to_string());
     }
 

@@ -35,12 +35,22 @@ impl SymbolIndex {
     pub fn ensure_file(&mut self, path: &Path) -> Result<&ExtractedFile, String> {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
-        let mtime = std::fs::metadata(&canonical)
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let meta = std::fs::metadata(&canonical).ok();
+        let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        let size = meta.as_ref().map(|m| m.len());
 
+        // Audit C5+M7: mtime alone is unreliable on filesystems with
+        // second (or worse) granularity — a same-second write after
+        // the cache fill produces an identical mtime and we serve
+        // stale extracts. Combine mtime + size; size catches almost
+        // every real edit (anything but a same-size in-place patch)
+        // without the cost of hashing the file content.
         let needs_refresh = match self.cache.get(&canonical) {
-            Some(entry) => mtime.map_or(true, |mt| mt != entry.mtime),
+            Some(entry) => {
+                let mtime_changed = mtime.map_or(true, |mt| mt != entry.mtime);
+                let size_changed = size.map_or(true, |sz| sz != entry.size);
+                mtime_changed || size_changed
+            }
             None => true,
         };
 
@@ -58,6 +68,9 @@ impl SymbolIndex {
             let mut extracted = adapter.extract(&canonical, &source)?;
             if let Some(mt) = mtime {
                 extracted.mtime = mt;
+            }
+            if let Some(sz) = size {
+                extracted.size = sz;
             }
             // Audit L14: LRU-evict the oldest entry before insert if
             // we're at the cap. Only fires when the path isn't

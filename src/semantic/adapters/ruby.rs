@@ -322,6 +322,7 @@ impl LanguageAdapter for RubyAdapter {
             exports,
             warnings,
             mtime: std::time::SystemTime::now(),
+            size: 0,
         })
     }
 

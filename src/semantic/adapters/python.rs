@@ -253,6 +253,7 @@ impl LanguageAdapter for PythonAdapter {
             exports,
             warnings,
             mtime: std::time::SystemTime::now(),
+            size: 0,
         })
     }
 
