@@ -13,6 +13,7 @@ mod streaming;
 mod terminal;
 pub(crate) mod theme;
 mod tree;
+mod wrap;
 
 use std::collections::VecDeque;
 
@@ -3327,10 +3328,20 @@ pub async fn run_interactive(
                             c_perm(),
                         )?;
                     }
-                    renderer.write_line(
-                        &format!("\n[question {}] {}", qi + 1, question.question),
-                        c_perm(),
-                    )?;
+                    // Soft-wrap the question stem so a long prompt
+                    // doesn't get char-broken mid-word. Continuation
+                    // lines indent under the text past `[question N] `
+                    // so wrapped tail aligns visually with the first
+                    // word of the question.
+                    let prefix = format!("[question {}] ", qi + 1);
+                    let prefix_w = prefix.chars().count();
+                    let cont_indent = " ".repeat(prefix_w);
+                    let stem = format!("{}{}", prefix, question.question);
+                    let width = renderer.line_width().saturating_sub(2).max(20);
+                    renderer.write_line("", c_perm())?;
+                    for row in wrap::soft_wrap(&stem, width, &cont_indent) {
+                        renderer.write_line(&row, c_perm())?;
+                    }
 
                     let multi = question.multi_select.unwrap_or(false);
                     let custom = question.custom;
@@ -3343,10 +3354,14 @@ pub async fn run_interactive(
                     let anchor = renderer.buffer_len();
 
                     loop {
-                        // Build option lines as Vec<LineEntry>
-                        let mut lines: Vec<LineEntry> = Vec::with_capacity(
-                            num_options + if custom { 2 } else { 1 },
-                        );
+                        // Build option lines as Vec<LineEntry>. Each
+                        // option's full text gets soft-wrapped through
+                        // the central `wrap::soft_wrap` helper so a
+                        // long description doesn't fall off the right
+                        // edge or hard-break mid-word.
+                        let width = renderer.line_width().saturating_sub(2).max(20);
+                        let mut lines: Vec<LineEntry> =
+                            Vec::with_capacity(num_options + if custom { 2 } else { 1 });
                         for (i, opt) in question.options.iter().enumerate() {
                             let marker = if i == cursor {
                                 if multi {
@@ -3354,31 +3369,45 @@ pub async fn run_interactive(
                                 } else {
                                     "▶"
                                 }
+                            } else if multi {
+                                if selected[i] { "  [x]" } else { "  [ ]" }
                             } else {
-                                if multi {
-                                    if selected[i] { "  [x]" } else { "  [ ]" }
-                                } else {
-                                    "  "
-                                }
+                                "  "
                             };
-                            lines.push(LineEntry {
-                                text: compact_str::CompactString::new(
-                                    &format!("  {} {} — {}", marker, opt.label, opt.description),
-                                ),
-                                color: c_perm(),
-                            });
+                            // Layout: `  <marker> <label> — <description>`.
+                            // Continuation rows align under the label
+                            // start (past the leading spaces + marker
+                            // + space) so the eye keeps the option
+                            // grouping visually.
+                            let head = format!("  {} ", marker);
+                            let head_w = head.chars().count();
+                            let body = format!("{} — {}", opt.label, opt.description);
+                            let cont_indent = " ".repeat(head_w);
+                            let full = format!("{}{}", head, body);
+                            for row in wrap::soft_wrap(&full, width, &cont_indent) {
+                                lines.push(LineEntry {
+                                    text: compact_str::CompactString::new(&row),
+                                    color: c_perm(),
+                                });
+                            }
                         }
                         if custom {
                             let custom_marker = if cursor == num_options { "▶" } else { "  " };
                             let custom_label = if let Some(ref t) = custom_text {
-                                format!("{} (custom) \"{}\"", custom_marker, t)
+                                format!("  {} (custom) \"{}\"", custom_marker, t)
                             } else {
-                                format!("{} (custom) type your own answer...", custom_marker)
+                                format!("  {} (custom) type your own answer...", custom_marker)
                             };
-                            lines.push(LineEntry {
-                                text: compact_str::CompactString::new(&custom_label),
-                                color: c_perm(),
-                            });
+                            // Same wrap treatment as the option rows
+                            // so a long custom-answer string doesn't
+                            // also fall off the edge.
+                            let cont = "        ";
+                            for row in wrap::soft_wrap(&custom_label, width, cont) {
+                                lines.push(LineEntry {
+                                    text: compact_str::CompactString::new(&row),
+                                    color: c_perm(),
+                                });
+                            }
                         }
                         lines.push(LineEntry {
                             text: compact_str::CompactString::new(if multi {

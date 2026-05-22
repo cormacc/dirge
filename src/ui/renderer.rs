@@ -346,18 +346,15 @@ impl Renderer {
     }
 
     fn wrap_line(&self, line: &str, max_width: usize) -> Vec<CompactString> {
-        // `chars.chunks(0)` panic-er ("chunk size must be non-zero"). Kan
-        // skje ved oppstart i en ikke-initialisert PTY eller midt i resize.
-        if max_width == 0 {
-            return vec![CompactString::new(line)];
-        }
-        let chars: Vec<char> = line.chars().collect();
-        if chars.len() <= max_width {
-            return vec![CompactString::new(line)];
-        }
-        chars
-            .chunks(max_width)
-            .map(|c| CompactString::new(c.iter().collect::<String>()))
+        // Every plain `write_line` ultimately routes through here.
+        // Centralise on `wrap::soft_wrap` so the whole UI shares one
+        // wrap policy: word-aware where possible, hard-break for
+        // unbreakable runs, display-width-aware (CJK/emoji),
+        // preserving hard newlines. Was previously a char-chunk
+        // hard wrap that broke mid-word.
+        crate::ui::wrap::soft_wrap(line, max_width, "")
+            .into_iter()
+            .map(CompactString::new)
             .collect()
     }
 
