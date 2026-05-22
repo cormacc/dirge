@@ -415,6 +415,13 @@ impl AnyModel {
 pub struct AnyAgent {
     inner: AnyAgentInner,
     cache: ToolCache,
+    /// Per-chunk read timeout resolved at build_agent time from
+    /// config (custom_providers.<n>.stream_chunk_timeout_secs >
+    /// providers.<n>.stream_chunk_timeout_secs > top-level
+    /// stream_chunk_timeout_secs > 300s default). Carried on the
+    /// agent so spawn_runner / run_print don't need to thread it
+    /// through every call site.
+    chunk_timeout: std::time::Duration,
 }
 
 #[derive(Clone)]
@@ -430,34 +437,40 @@ pub(crate) enum AnyAgentInner {
 }
 
 impl AnyAgent {
-    pub fn new(inner: AnyAgentInner, cache: ToolCache) -> Self {
-        AnyAgent { inner, cache }
+    pub fn new(inner: AnyAgentInner, cache: ToolCache, chunk_timeout: std::time::Duration) -> Self {
+        AnyAgent {
+            inner,
+            cache,
+            chunk_timeout,
+        }
     }
 
     pub async fn run_print(&self, prompt: &str, max_turns: usize) -> anyhow::Result<String> {
+        let t = self.chunk_timeout;
         match &self.inner {
-            AnyAgentInner::OpenRouter(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgentInner::OpenAI(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgentInner::Anthropic(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgentInner::Gemini(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgentInner::DeepSeek(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgentInner::Glm(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgentInner::Ollama(a) => runner::run_print(a, prompt, max_turns).await,
-            AnyAgentInner::Custom(a) => runner::run_print(a, prompt, max_turns).await,
+            AnyAgentInner::OpenRouter(a) => runner::run_print(a, prompt, max_turns, t).await,
+            AnyAgentInner::OpenAI(a) => runner::run_print(a, prompt, max_turns, t).await,
+            AnyAgentInner::Anthropic(a) => runner::run_print(a, prompt, max_turns, t).await,
+            AnyAgentInner::Gemini(a) => runner::run_print(a, prompt, max_turns, t).await,
+            AnyAgentInner::DeepSeek(a) => runner::run_print(a, prompt, max_turns, t).await,
+            AnyAgentInner::Glm(a) => runner::run_print(a, prompt, max_turns, t).await,
+            AnyAgentInner::Ollama(a) => runner::run_print(a, prompt, max_turns, t).await,
+            AnyAgentInner::Custom(a) => runner::run_print(a, prompt, max_turns, t).await,
         }
     }
 
     pub fn spawn_runner(self, prompt: String, history: Vec<Message>) -> AgentRunner {
         self.cache.clear();
+        let t = self.chunk_timeout;
         match self.inner {
-            AnyAgentInner::OpenRouter(a) => runner::spawn_agent(a, prompt, history, self.cache),
-            AnyAgentInner::OpenAI(a) => runner::spawn_agent(a, prompt, history, self.cache),
-            AnyAgentInner::Anthropic(a) => runner::spawn_agent(a, prompt, history, self.cache),
-            AnyAgentInner::Gemini(a) => runner::spawn_agent(a, prompt, history, self.cache),
-            AnyAgentInner::DeepSeek(a) => runner::spawn_agent(a, prompt, history, self.cache),
-            AnyAgentInner::Glm(a) => runner::spawn_agent(a, prompt, history, self.cache),
-            AnyAgentInner::Ollama(a) => runner::spawn_agent(a, prompt, history, self.cache),
-            AnyAgentInner::Custom(a) => runner::spawn_agent(a, prompt, history, self.cache),
+            AnyAgentInner::OpenRouter(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+            AnyAgentInner::OpenAI(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+            AnyAgentInner::Anthropic(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+            AnyAgentInner::Gemini(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+            AnyAgentInner::DeepSeek(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+            AnyAgentInner::Glm(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+            AnyAgentInner::Ollama(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+            AnyAgentInner::Custom(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
         }
     }
 }
@@ -572,6 +585,12 @@ pub async fn build_agent(
     #[cfg(feature = "semantic")] semantic_manager: Option<&SemanticManager>,
 ) -> AnyAgent {
     let parent_model = model.clone();
+    // Resolve the per-provider chunk timeout once here so every
+    // spawn_runner / run_print call on the resulting agent uses the
+    // same value. Provider name comes from the resolved CLI / config
+    // (already factored into resolve_provider above the call site).
+    let provider_name = cli.resolve_provider(cfg);
+    let chunk_timeout = cfg.resolve_stream_chunk_timeout(&provider_name);
 
     macro_rules! build_inner {
         ($m:expr, $variant:ident) => {{
@@ -595,7 +614,7 @@ pub async fn build_agent(
                 semantic_manager,
             )
             .await;
-            AnyAgent::new(AnyAgentInner::$variant(agent), cache)
+            AnyAgent::new(AnyAgentInner::$variant(agent), cache, chunk_timeout)
         }};
     }
 

@@ -16,6 +16,26 @@ pub struct CustomProviderConfig {
     pub provider_type: String,
     pub base_url: String,
     pub api_key_env: Option<String>,
+    /// Per-provider override for the streaming chunk timeout. Same
+    /// units / semantics as the top-level `stream_chunk_timeout_secs`
+    /// but takes precedence for this specific provider. Useful when
+    /// one custom endpoint (e.g. a self-hosted reasoning model) needs
+    /// a generous gap and others should fail faster.
+    pub stream_chunk_timeout_secs: Option<u64>,
+}
+
+/// Per-provider tuning knobs that apply to a built-in provider name
+/// (anthropic, openai, openrouter, gemini, deepseek, glm, ollama).
+/// Keyed by `providers.<name>` in config.json. Currently carries
+/// only the chunk timeout; expand as more per-provider knobs land.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProviderSettings {
+    /// Override the streaming chunk timeout for this provider.
+    /// Precedence: this > top-level `stream_chunk_timeout_secs` >
+    /// default 300s. Useful e.g. for Anthropic extended-thinking
+    /// runs that legitimately exceed the 5-minute default.
+    pub stream_chunk_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -104,6 +124,11 @@ pub struct Config {
     pub max_agent_turns: Option<usize>,
     pub compact_enabled: Option<bool>,
     pub custom_providers: Option<HashMap<String, CustomProviderConfig>>,
+    /// Per-built-in-provider tuning. Keyed by provider name
+    /// (`anthropic`, `openai`, `openrouter`, `gemini`, `deepseek`,
+    /// `glm`, `ollama`). Currently only the chunk timeout; expand
+    /// as more knobs land.
+    pub providers: Option<HashMap<String, ProviderSettings>>,
     pub permission: Option<serde_json::Value>,
     pub restrictive: Option<bool>,
     pub accept_all: Option<bool>,
@@ -120,6 +145,14 @@ pub struct Config {
     /// `tool_result_max_chars` still applies on top as a hard
     /// character ceiling for the displayed slice.
     pub tool_result_max_lines: Option<usize>,
+    /// Per-chunk read deadline for streaming LLM responses, in seconds.
+    /// Default 300s (5 min). Bump higher (600–900) if you use models
+    /// with very long reasoning budgets (Claude 3.7 extended thinking,
+    /// GPT-5 thinking, etc.) and see false-positive "stream chunk timed
+    /// out" errors mid-turn. Set lower if you want faster failure
+    /// detection on flaky networks; below ~60s is risky on reasoning
+    /// models.
+    pub stream_chunk_timeout_secs: Option<u64>,
     pub default_prompt: Option<String>,
     /// UI color theme. Known built-in values: `phosphor` (default,
     /// 80s CRT green) and `plain` (white/cyan).
@@ -175,6 +208,34 @@ impl Config {
 
     pub fn resolve_tool_result_max_lines(&self) -> usize {
         self.tool_result_max_lines.unwrap_or(4)
+    }
+
+    /// Resolve the chunk timeout for the active provider.
+    ///
+    /// Precedence:
+    ///   1. `custom_providers[name].stream_chunk_timeout_secs`
+    ///   2. `providers[name].stream_chunk_timeout_secs`
+    ///   3. top-level `stream_chunk_timeout_secs`
+    ///   4. `DEFAULT_STREAM_CHUNK_TIMEOUT_SECS` (300s)
+    ///
+    /// Passing an unknown / empty provider name falls through past
+    /// (1) and (2) to the top-level / default.
+    pub fn resolve_stream_chunk_timeout(&self, provider: &str) -> std::time::Duration {
+        let from_custom = self
+            .custom_providers
+            .as_ref()
+            .and_then(|m| m.get(provider))
+            .and_then(|c| c.stream_chunk_timeout_secs);
+        let from_provider = self
+            .providers
+            .as_ref()
+            .and_then(|m| m.get(provider))
+            .and_then(|p| p.stream_chunk_timeout_secs);
+        let secs = from_custom
+            .or(from_provider)
+            .or(self.stream_chunk_timeout_secs)
+            .unwrap_or(crate::agent::runner::DEFAULT_STREAM_CHUNK_TIMEOUT_SECS);
+        std::time::Duration::from_secs(secs)
     }
 
     pub fn resolve_show_edit_diff(&self) -> bool {

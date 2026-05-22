@@ -14,15 +14,20 @@ use crate::session::{MessageRole, Session};
 
 /// Per-chunk read deadline for streaming provider responses. Applied
 /// to every `stream.next().await` in both the interactive and
-/// `run_print` paths. If the provider stalls mid-stream (TCP alive
-/// but no SSE events — common with overloaded proxies, dropped
-/// connections that never RST, hung server-side queues), the stream
-/// would otherwise block forever and freeze the agent. Treat a
-/// chunk timeout as a transient error so the retry loop in
-/// `spawn_agent` can classify it as `Network`, back off, and
-/// re-issue. 120s matches opencode's default and is well above any
-/// reasonable real chunk gap for streaming providers.
-const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// `run_print` paths. The reason a finite timeout exists at all:
+/// `reqwest`'s default streaming behaviour doesn't detect silently-
+/// dropped TCP connections (no RST, no FIN — the socket reads block
+/// forever). A finite timeout converts that into a retryable
+/// `Network` error so the retry loop in `spawn_agent` can re-issue.
+///
+/// Original value (120s) was too aggressive for reasoning-heavy
+/// models. Claude 3.7 / GPT-5 extended thinking, large tool outputs
+/// being processed, and provider load spikes routinely produce
+/// 2-4 minute chunk gaps that are NOT failures — the model is
+/// thinking. The default is now 5 minutes; users with even longer
+/// reasoning budgets can bump it via `stream_chunk_timeout_secs`
+/// in config.json.
+pub const DEFAULT_STREAM_CHUNK_TIMEOUT_SECS: u64 = 300;
 
 /// Turn-boundary detector. Rig's multi-turn stream is a flat sequence
 /// of assistant content + tool results + a final response; consumers
@@ -240,6 +245,7 @@ async fn run_stream<M, P>(
     history: Vec<Message>,
     event_tx: &mpsc::Sender<AgentEvent>,
     interject_rx: &mut mpsc::Receiver<()>,
+    chunk_timeout: std::time::Duration,
 ) -> StreamOutcome
 where
     M: CompletionModel + 'static,
@@ -269,7 +275,7 @@ where
     }
 
     loop {
-        let item = match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+        let item = match tokio::time::timeout(chunk_timeout, stream.next()).await {
             Ok(Some(item)) => item,
             Ok(None) => break,
             Err(_) => {
@@ -286,8 +292,8 @@ where
                 // this would fall through to `Other` and surface as
                 // a hard failure.
                 outcome.error = Some(format!(
-                    "stream chunk timed out after {}s (provider stalled or connection silently dropped)",
-                    STREAM_CHUNK_TIMEOUT.as_secs(),
+                    "stream chunk timed out after {}s (provider stalled or connection silently dropped) — bump `stream_chunk_timeout_secs` in config.json if your model has long reasoning gaps",
+                    chunk_timeout.as_secs(),
                 ));
                 return outcome;
             }
@@ -417,6 +423,7 @@ pub fn spawn_agent<M, P>(
     prompt: String,
     history: Vec<Message>,
     cache: ToolCache,
+    chunk_timeout: std::time::Duration,
 ) -> AgentRunner
 where
     M: CompletionModel + 'static,
@@ -439,6 +446,7 @@ where
                 history.clone(),
                 &event_tx,
                 &mut interject_rx,
+                chunk_timeout,
             )
             .await;
 
@@ -563,6 +571,7 @@ pub async fn run_print<M, P>(
     agent: &Agent<M, P>,
     prompt: &str,
     max_turns: usize,
+    chunk_timeout: std::time::Duration,
 ) -> anyhow::Result<String>
 where
     M: CompletionModel + 'static,
@@ -592,13 +601,13 @@ where
         let mut stream_error: Option<String> = None;
 
         loop {
-            let item = match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+            let item = match tokio::time::timeout(chunk_timeout, stream.next()).await {
                 Ok(Some(item)) => item,
                 Ok(None) => break,
                 Err(_) => {
                     stream_error = Some(format!(
-                        "stream chunk timed out after {}s (provider stalled or connection silently dropped)",
-                        STREAM_CHUNK_TIMEOUT.as_secs(),
+                        "stream chunk timed out after {}s (provider stalled or connection silently dropped) — bump `stream_chunk_timeout_secs` in config.json if your model has long reasoning gaps",
+                        chunk_timeout.as_secs(),
                     ));
                     break;
                 }
