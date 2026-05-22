@@ -175,6 +175,22 @@ pub struct LoopConfig {
     /// OR when `get_api_key` returns None. Pi field
     /// `config.apiKey` (inherited from `SimpleStreamOptions`).
     pub api_key: Option<String>,
+
+    /// Tool execution mode. Pi field `toolExecution?:
+    /// ToolExecutionMode` (types.ts:254). Default `Parallel`
+    /// per pi's docs. Per-tool `execution_mode` can FORCE
+    /// sequential per pi at agent-loop.ts:381-383.
+    pub tool_execution: ToolExecutionMode,
+
+    /// Phase 2 hook — fires before tool dispatch. May mutate
+    /// args or block the call. Port of pi `beforeToolCall?`
+    /// (types.ts:262).
+    pub before_tool_call: Option<super::hooks::BeforeToolCallFn>,
+
+    /// Phase 2 hook — fires after tool execution. May override
+    /// content / details / isError / terminate. Port of pi
+    /// `afterToolCall?` (types.ts:276).
+    pub after_tool_call: Option<super::hooks::AfterToolCallFn>,
 }
 
 /// `convertToLlm` signature. Synchronous in pi (returns
@@ -218,6 +234,15 @@ impl std::fmt::Debug for LoopConfig {
             )
             .field("get_api_key", &self.get_api_key.as_ref().map(|_| "<fn>"))
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .field("tool_execution", &self.tool_execution)
+            .field(
+                "before_tool_call",
+                &self.before_tool_call.as_ref().map(|_| "<fn>"),
+            )
+            .field(
+                "after_tool_call",
+                &self.after_tool_call.as_ref().map(|_| "<fn>"),
+            )
             .finish()
     }
 }
@@ -229,6 +254,9 @@ impl Clone for LoopConfig {
             transform_context: self.transform_context.clone(),
             get_api_key: self.get_api_key.clone(),
             api_key: self.api_key.clone(),
+            tool_execution: self.tool_execution,
+            before_tool_call: self.before_tool_call.clone(),
+            after_tool_call: self.after_tool_call.clone(),
         }
     }
 }

@@ -31,7 +31,7 @@ use futures::Stream;
 use futures::stream::StreamExt;
 use tokio::sync::mpsc;
 
-use super::message::{AssistantMessage, LoopEvent, StopReason, StreamEvent};
+use super::message::{AssistantMessage, LoopEvent, LoopMessage, StopReason, StreamEvent};
 use super::tool::AbortSignal;
 use super::types::{Context, LoopConfig};
 
@@ -122,7 +122,9 @@ pub async fn stream_assistant_response(
                 context.messages.push(serialize_assistant(&partial));
                 added_partial = true;
                 let _ = emit
-                    .send(LoopEvent::MessageStart { message: partial })
+                    .send(LoopEvent::MessageStart {
+                        message: LoopMessage::Assistant(partial),
+                    })
                     .await;
             }
             StreamEvent::Delta { partial, phase } => {
@@ -204,13 +206,13 @@ async fn finalize(
         context.messages.push(serialize_assistant(final_msg));
         let _ = emit
             .send(LoopEvent::MessageStart {
-                message: final_msg.clone(),
+                message: LoopMessage::Assistant(final_msg.clone()),
             })
             .await;
     }
     let _ = emit
         .send(LoopEvent::MessageEnd {
-            message: final_msg.clone(),
+            message: LoopMessage::Assistant(final_msg.clone()),
         })
         .await;
 }
@@ -295,6 +297,9 @@ mod tests {
             transform_context: None,
             get_api_key: None,
             api_key: None,
+            tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,
+            before_tool_call: None,
+            after_tool_call: None,
         }
     }
 
@@ -470,6 +475,9 @@ mod tests {
             transform_context: Some(transform),
             get_api_key: None,
             api_key: None,
+            tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,
+            before_tool_call: None,
+            after_tool_call: None,
         };
         let signal = AbortSignal::new();
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(32);

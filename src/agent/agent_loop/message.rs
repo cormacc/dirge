@@ -177,6 +177,69 @@ pub enum DeltaPhase {
 /// Naming: pi uses `message_start` / `message_end` / `message_update`
 /// — those map to `MessageStart` / `MessageEnd` / `MessageUpdate`
 /// here, with serde rename for wire-format parity.
+/// Plain user-side message. Port of pi `UserMessage` (from
+/// `@earendil-works/pi-ai`). Phase 2 surface — `content` is a
+/// raw string for now (pi supports content blocks for images
+/// etc., deferred until a real consumer wants them).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserMessage {
+    pub content: String,
+}
+
+/// Tool-result message appended to the transcript after a tool
+/// dispatches. Port of pi `ToolResultMessage` (used at
+/// agent-loop.ts:727-737).
+///
+/// Pi shape:
+///   `{ role: "toolResult", toolCallId, toolName, content, details,
+///      isError, timestamp }`
+///
+/// `role` is implicit. `timestamp` deferred until needed (pi uses
+/// it for log ordering; our event sequence already orders things).
+/// `content` and `details` carry the LLM-visible payload and the
+/// structured metadata respectively — same split as `LoopToolResult`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolResultMessage {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub content: Vec<ContentBlock>,
+    pub details: Value,
+    pub is_error: bool,
+}
+
+/// Unified message vocabulary the loop transcripts and events
+/// reference. Port of pi `AgentMessage = Message |
+/// CustomAgentMessages[keyof CustomAgentMessages]` (types.ts:309).
+///
+/// `Custom` is the extension point — pi lets apps add their own
+/// message variants via TypeScript declaration merging; we
+/// reserve a `Custom(Value)` variant for the same purpose. Phase
+/// 7 finalises the custom-message integration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoopMessage {
+    User(UserMessage),
+    Assistant(AssistantMessage),
+    ToolResult(ToolResultMessage),
+    /// App-defined message that `convertToLlm` filters out before
+    /// the LLM call. See `CustomAgentMessages` in pi types.ts:300.
+    Custom(Value),
+}
+
+impl LoopMessage {
+    /// String role for downstream filters that need to switch on
+    /// role without matching the variant. Matches pi's literal
+    /// roles: `"user"`, `"assistant"`, `"toolResult"`, plus our
+    /// `"custom"` for the extension variant.
+    pub fn role(&self) -> &'static str {
+        match self {
+            LoopMessage::User(_) => "user",
+            LoopMessage::Assistant(_) => "assistant",
+            LoopMessage::ToolResult(_) => "toolResult",
+            LoopMessage::Custom(_) => "custom",
+        }
+    }
+}
+
 /// Pi's `AgentEvent` is plain JSON-serializable in TypeScript;
 /// here we keep `LoopEvent` as a Rust-only enum. The fields hold
 /// in-memory `AssistantMessage` instances, not their JSON form,
@@ -186,20 +249,50 @@ pub enum DeltaPhase {
 #[derive(Debug, Clone)]
 pub enum LoopEvent {
     /// A new message has appeared in the transcript. Pi field
-    /// `{ message: AgentMessage }`.
-    MessageStart { message: AssistantMessage },
+    /// `{ message: AgentMessage }`. Carries any LoopMessage
+    /// variant (user / assistant / toolResult / custom).
+    MessageStart { message: LoopMessage },
 
-    /// A streaming message has advanced. Pi carries the stream
-    /// event alongside the updated message; phase 1 carries the
-    /// `phase` discriminator instead (the consumer rarely needs
-    /// the raw stream event).
+    /// A streaming assistant message has advanced. Pi carries
+    /// the stream event alongside the updated message; phase 1
+    /// carries the `phase` discriminator instead. ASSISTANT-only
+    /// (other message types never stream).
     MessageUpdate {
         message: AssistantMessage,
         phase: DeltaPhase,
     },
 
-    /// A message has finalized (stream emitted `done` or `error`).
-    MessageEnd { message: AssistantMessage },
+    /// A message has finalized. Pi field
+    /// `{ message: AgentMessage }`. Carries any LoopMessage
+    /// variant.
+    MessageEnd { message: LoopMessage },
+
+    /// Tool dispatch is about to begin. Port of pi
+    /// `tool_execution_start` (types.ts:416).
+    ToolExecutionStart {
+        tool_call_id: String,
+        tool_name: String,
+        args: Value,
+    },
+
+    /// Tool emitted an in-flight partial result via the
+    /// `on_update` callback. Port of pi `tool_execution_update`
+    /// (types.ts:417).
+    ToolExecutionUpdate {
+        tool_call_id: String,
+        tool_name: String,
+        args: Value,
+        partial_result: super::result::LoopToolResult,
+    },
+
+    /// Tool dispatch finished (successfully or with error). Port
+    /// of pi `tool_execution_end` (types.ts:418).
+    ToolExecutionEnd {
+        tool_call_id: String,
+        tool_name: String,
+        result: super::result::LoopToolResult,
+        is_error: bool,
+    },
 }
 
 impl LoopEvent {
@@ -211,6 +304,9 @@ impl LoopEvent {
             LoopEvent::MessageStart { .. } => "message_start",
             LoopEvent::MessageUpdate { .. } => "message_update",
             LoopEvent::MessageEnd { .. } => "message_end",
+            LoopEvent::ToolExecutionStart { .. } => "tool_execution_start",
+            LoopEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
+            LoopEvent::ToolExecutionEnd { .. } => "tool_execution_end",
         }
     }
 }
@@ -290,20 +386,21 @@ mod tests {
     }
 
     /// `LoopEvent::kind()` returns the snake_case discriminator
-    /// pi tests compare against.
+    /// pi tests compare against. Covers all phase 1-2 variants.
     #[test]
     fn loop_event_kind_strings() {
         let empty = AssistantMessage::new(vec![], StopReason::Stop);
+        let assistant_msg = LoopMessage::Assistant(empty.clone());
         assert_eq!(
             LoopEvent::MessageStart {
-                message: empty.clone()
+                message: assistant_msg.clone(),
             }
             .kind(),
             "message_start"
         );
         assert_eq!(
             LoopEvent::MessageEnd {
-                message: empty.clone()
+                message: assistant_msg,
             }
             .kind(),
             "message_end"
@@ -316,5 +413,62 @@ mod tests {
             .kind(),
             "message_update"
         );
+        assert_eq!(
+            LoopEvent::ToolExecutionStart {
+                tool_call_id: "1".to_string(),
+                tool_name: "echo".to_string(),
+                args: Value::Null,
+            }
+            .kind(),
+            "tool_execution_start"
+        );
+        assert_eq!(
+            LoopEvent::ToolExecutionUpdate {
+                tool_call_id: "1".to_string(),
+                tool_name: "echo".to_string(),
+                args: Value::Null,
+                partial_result: Default::default(),
+            }
+            .kind(),
+            "tool_execution_update"
+        );
+        assert_eq!(
+            LoopEvent::ToolExecutionEnd {
+                tool_call_id: "1".to_string(),
+                tool_name: "echo".to_string(),
+                result: Default::default(),
+                is_error: false,
+            }
+            .kind(),
+            "tool_execution_end"
+        );
+    }
+
+    /// `LoopMessage::role()` strings match pi's literal roles.
+    #[test]
+    fn loop_message_role_strings() {
+        assert_eq!(
+            LoopMessage::User(UserMessage {
+                content: "hi".to_string()
+            })
+            .role(),
+            "user"
+        );
+        assert_eq!(
+            LoopMessage::Assistant(AssistantMessage::new(vec![], StopReason::Stop)).role(),
+            "assistant"
+        );
+        assert_eq!(
+            LoopMessage::ToolResult(ToolResultMessage {
+                tool_call_id: "1".to_string(),
+                tool_name: "echo".to_string(),
+                content: vec![],
+                details: Value::Null,
+                is_error: false,
+            })
+            .role(),
+            "toolResult"
+        );
+        assert_eq!(LoopMessage::Custom(Value::Null).role(), "custom");
     }
 }

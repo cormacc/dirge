@@ -22,16 +22,28 @@
 // nothing imports `crate::agent::agent_loop::Foo` yet — phase 1+ will.
 #![allow(unused_imports)]
 
+pub mod hooks;
 pub mod message;
 pub mod result;
 pub mod stream;
 pub mod tool;
+pub mod tools;
 pub mod types;
 
-pub use message::{AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, StopReason, StreamEvent};
+pub use hooks::{
+    AfterToolCallContext, AfterToolCallFn, BeforeToolCallContext, BeforeToolCallFn,
+    BeforeToolCallReturn,
+};
+pub use message::{
+    AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason, StreamEvent,
+    ToolResultMessage, UserMessage,
+};
 pub use result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 pub use stream::{LlmContext, StreamFn, stream_assistant_response};
 pub use tool::LoopTool;
+pub use tools::{
+    ExecutedToolCallBatch, ToolCall, execute_tool_calls_sequential, extract_tool_calls,
+};
 pub use types::{
     Context, ConvertToLlmFn, GetApiKeyFn, LoopConfig, QueueMode, ThinkingLevel, ToolExecutionMode,
     TransformContextFn, TurnUpdate,
