@@ -433,14 +433,13 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
 /// default (Parallel) — batches of all-read-only tools dispatch
 /// concurrently.
 ///
-/// This temporarily duplicates the tool list from
-/// `build_agent_inner`. Phase 4.5h-6 unifies the two paths
-/// (single tool-construction site routed through the loop) and
-/// this duplication goes away.
-///
-/// `#[allow(dead_code)]` is transitional — production caller
-/// (replacing the rig multi-turn path) lands in phase 4.5h-6.
-#[allow(dead_code)]
+/// Note: tool construction is temporarily duplicated between
+/// `build_agent_inner` (rig path, retained for the rig Agent's
+/// preamble + model only) and `build_loop_tools` (new path,
+/// active dispatch). The rig Agent's tools are no longer
+/// invoked after phase 4.5h-6 — the loop dispatches through
+/// the LoopTool registry returned here. A follow-up commit can
+/// strip the unused tool list from `build_agent_inner`.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_loop_tools(
     cache: ToolCache,

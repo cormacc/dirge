@@ -13,13 +13,14 @@
 //! divergences can be audited against the reference. Pi is the spec —
 //! we're not redesigning, we're porting.
 
-// Module-level allows cover the transitional state: 4.5h-1 through
-// 4.5h-2 have landed the building blocks but production callsites
-// (`provider::spawn_runner`) still route through the legacy
-// `runner::run_stream` path. The unused warnings are correctly
-// noting "API surface with no production consumer yet"; both
-// allows come off in 4.5h-6 when the legacy path is deleted and
-// every public item has a real caller.
+// After phase 4.5h-6 cutover, the agent_loop module is wired
+// into production via provider::spawn_runner. The module also
+// exposes a library-like surface (LoopConfig hook slots, custom
+// message types, optional steering / interjection plumbing,
+// rig-stream helpers, recovery wrapper variants) that's
+// available to future wiring but not all binary-reachable yet.
+// Module-level `dead_code` + `unused_imports` allows cover the
+// transitional state without scattering per-item gates.
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
@@ -47,7 +48,10 @@ pub use hooks::{
     BeforeToolCallReturn, GetFollowupMessagesFn, GetSteeringMessagesFn, PrepareNextTurnFn,
     ShouldStopAfterTurnFn, TurnHookContext,
 };
-pub use integration::{LoopRunner, LoopSpawnConfig, spawn_loop_runner};
+pub use integration::{
+    LoopRunner, LoopSpawnConfig, rig_history_system_prompt, rig_history_to_loop_messages,
+    rig_message_to_loop_messages, spawn_loop_runner,
+};
 pub use message::{
     AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason, StreamEvent,
     ToolResultMessage, UserMessage,

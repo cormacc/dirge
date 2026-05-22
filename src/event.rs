@@ -129,6 +129,15 @@ pub enum AgentEvent {
     /// so far is captured in `partial_response`. The UI is expected to
     /// commit it as an assistant message and then drain its interjection
     /// queue as the next user turn.
+    ///
+    /// Phase 4.5h-6: not currently constructed by the new agent_loop
+    /// path. The legacy runner emitted this on graceful stops; the
+    /// new path's interject_tx → signal.cancel() → AgentEvent::Done
+    /// flow covers the same observable behavior. The variant is
+    /// retained because UI matchers reference it and a future commit
+    /// may re-emit it for partial-response capture during graceful
+    /// cancellation.
+    #[allow(dead_code)]
     Interjected {
         partial_response: CompactString,
         tokens: u64,

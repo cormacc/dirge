@@ -430,6 +430,15 @@ pub struct AnyAgent {
     /// agent so spawn_runner / run_print don't need to thread it
     /// through every call site.
     chunk_timeout: std::time::Duration,
+    /// Phase 4.5h-6: LoopTool registry the new agent_loop path
+    /// dispatches against. Built once at `build_agent` time via
+    /// `agent::builder::build_loop_tools`. `Vec<Arc<...>>` is
+    /// clone-cheap (Arc bump).
+    loop_tools: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>>,
+    /// Phase 4.5h-6: system prompt for the new loop path.
+    /// Extracted from the rig Agent's preamble field at build
+    /// time (every variant exposes `Agent.preamble: Option<String>`).
+    preamble: String,
 }
 
 #[derive(Clone)]
@@ -445,11 +454,19 @@ pub(crate) enum AnyAgentInner {
 }
 
 impl AnyAgent {
-    pub fn new(inner: AnyAgentInner, cache: ToolCache, chunk_timeout: std::time::Duration) -> Self {
+    pub fn new(
+        inner: AnyAgentInner,
+        cache: ToolCache,
+        chunk_timeout: std::time::Duration,
+        loop_tools: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>>,
+        preamble: String,
+    ) -> Self {
         AnyAgent {
             inner,
             cache,
             chunk_timeout,
+            loop_tools,
+            preamble,
         }
     }
 
@@ -467,30 +484,79 @@ impl AnyAgent {
         }
     }
 
+    /// Phase 4.5h-6 cutover: route through the new agent_loop
+    /// path. Composes 4.5a (rig stream), 4.5b (rig tool adapter,
+    /// done at build time via build_loop_tools), 4.5c (event
+    /// bridge), 4.5d (plugin hooks from the global manager),
+    /// 4.5g (retry wrapper around the stream), and emits
+    /// `AgentEvent`s on the existing `AgentRunner` shape so UI /
+    /// ACP callsites work unchanged.
+    ///
+    /// Returns immediately with `AgentRunner`; the loop runs on
+    /// a spawned tokio task.
     pub fn spawn_runner(self, prompt: String, history: Vec<Message>) -> AgentRunner {
+        use crate::agent::agent_loop::{
+            LoopSpawnConfig, loop_tool_to_rig_definition, retrying_stream_fn,
+            rig_history_system_prompt, rig_history_to_loop_messages, spawn_loop_runner,
+        };
+        use crate::agent::recovery::RecoveryPolicy;
+
         self.cache.clear();
-        let t = self.chunk_timeout;
-        match self.inner {
-            AnyAgentInner::OpenRouter(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
-            AnyAgentInner::OpenAI(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
-            AnyAgentInner::Anthropic(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
-            AnyAgentInner::Gemini(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
-            AnyAgentInner::DeepSeek(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
-            AnyAgentInner::Glm(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
-            AnyAgentInner::Ollama(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
-            AnyAgentInner::Custom(a) => runner::spawn_agent(a, prompt, history, self.cache, t),
+
+        // Convert tool registry → rig ToolDefinitions for the
+        // request builder, and keep the registry itself for the
+        // loop's dispatch.
+        let tool_defs: Vec<rig::completion::ToolDefinition> = self
+            .loop_tools
+            .iter()
+            .map(|t| loop_tool_to_rig_definition(t.as_ref()))
+            .collect();
+
+        // Build the StreamFn (4.5h-2 + 4.5h-3 chunk timeout).
+        let inner_stream_fn = self.build_stream_fn(tool_defs);
+        // Wrap with retry (4.5g) so transient Network / RateLimit
+        // errors auto-retry with exponential backoff + Retry-After.
+        let stream_fn = retrying_stream_fn(inner_stream_fn, RecoveryPolicy::default());
+
+        // Merge any system-message content from the history
+        // (e.g. compaction summary) into the loop's
+        // Context.system_prompt. The Agent's preamble (model
+        // identity + tool docs) is the base; session-side
+        // system messages append.
+        let history_preamble = rig_history_system_prompt(&history);
+        let system_prompt = if history_preamble.is_empty() {
+            self.preamble.clone()
+        } else {
+            format!("{}\n\n{}", self.preamble, history_preamble)
+        };
+
+        // Convert rig history → loop messages (Session-side
+        // user/assistant/toolResult shapes).
+        let loop_history = rig_history_to_loop_messages(history);
+
+        let mut cfg = LoopSpawnConfig::minimal(stream_fn, prompt);
+        cfg.system_prompt = system_prompt;
+        cfg.history = loop_history;
+        cfg.tools = self.loop_tools;
+        #[cfg(feature = "plugin")]
+        {
+            cfg.plugin_mgr = crate::plugin::hook::global();
         }
+        // steering_queue stays None for h-6 — UI's existing
+        // interjection_queue isn't shared yet. interject_tx →
+        // signal.cancel() handles the legacy "stop the run"
+        // case via the LoopRunner::into_agent_runner adapter.
+        // A follow-up UI commit will share the queue so the
+        // model observes interjections mid-run.
+
+        let loop_runner = spawn_loop_runner(cfg);
+        loop_runner.into_agent_runner()
     }
 
     /// Phase 4.5h-2: produce a `StreamFn` from this agent's
     /// underlying `CompletionModel`, threading the supplied tool
     /// definitions. Used by the new loop path (`spawn_loop_runner`)
     /// to drive a real LLM through the ported agent_loop.
-    ///
-    /// `#[allow(dead_code)]` is transitional — production caller
-    /// (replacing the rig multi-turn path inside
-    /// `spawn_runner`) lands in phase 4.5h-6. Until then this
-    /// method is exercised only by the in-module tests.
     ///
     /// Dispatch is a match over `AnyAgentInner`; each variant
     /// extracts its provider-specific `Arc<M>` and threads it
@@ -506,7 +572,6 @@ impl AnyAgent {
     /// each `Arc<dyn LoopTool>` to a rig `ToolDefinition` via
     /// `agent_loop::loop_tool_to_rig_definition` before calling
     /// this method.
-    #[allow(dead_code)]
     pub fn build_stream_fn(
         &self,
         tools: Vec<rig::completion::ToolDefinition>,
@@ -661,6 +726,20 @@ pub async fn build_agent(
 
     macro_rules! build_inner {
         ($m:expr, $variant:ident) => {{
+            // Clone params before consuming them in
+            // build_agent_inner so build_loop_tools has fresh
+            // copies. PermCheck / AskSender / Sandbox / Arc<...>
+            // are all Clone-cheap.
+            let permission_for_loop = permission.clone();
+            let ask_tx_for_loop = ask_tx.clone();
+            let question_tx_for_loop = question_tx.clone();
+            let plan_tx_for_loop = plan_tx.clone();
+            let bg_store_for_loop = bg_store.clone();
+            let sandbox_for_loop = sandbox.clone();
+            let parent_model_for_loop = Some(parent_model.clone());
+            #[cfg(feature = "lsp")]
+            let lsp_for_loop = lsp_manager.clone();
+
             let (agent, cache) = builder::build_agent_inner(
                 $m,
                 cli,
@@ -681,7 +760,44 @@ pub async fn build_agent(
                 semantic_manager,
             )
             .await;
-            AnyAgent::new(AnyAgentInner::$variant(agent), cache, chunk_timeout)
+
+            // Phase 4.5h-6: also build the LoopTool registry the
+            // new agent_loop path dispatches against. Tools share
+            // the same cache as the rig path (tool result
+            // dedup) — though after h-6 the rig path no longer
+            // runs, so this is effectively single-owner.
+            let loop_tools = builder::build_loop_tools(
+                cache.clone(),
+                permission_for_loop,
+                ask_tx_for_loop,
+                question_tx_for_loop,
+                plan_tx_for_loop,
+                bg_store_for_loop,
+                #[cfg(feature = "lsp")]
+                lsp_for_loop,
+                sandbox_for_loop,
+                parent_model_for_loop,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+                #[cfg(feature = "semantic")]
+                semantic_manager,
+                cli,
+                cfg,
+            )
+            .await;
+
+            // Phase 4.5h-6: extract the rig Agent's preamble so
+            // the new path can pass it as Context.system_prompt.
+            // rig's Agent has `preamble: Option<String>` public.
+            let preamble = agent.preamble.clone().unwrap_or_default();
+
+            AnyAgent::new(
+                AnyAgentInner::$variant(agent),
+                cache,
+                chunk_timeout,
+                loop_tools,
+                preamble,
+            )
         }};
     }
 
@@ -780,6 +896,8 @@ mod tests {
             AnyAgentInner::OpenAI(agent),
             ToolCache::new(),
             std::time::Duration::from_secs(300),
+            Vec::new(),    // loop_tools — empty for test fixture
+            String::new(), // preamble — empty for test fixture
         )
     }
 

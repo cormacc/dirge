@@ -89,6 +89,196 @@ pub struct LoopRunner {
     pub signal: AbortSignal,
 }
 
+impl LoopRunner {
+    /// Phase 4.5h-6: adapt this LoopRunner to the existing
+    /// `runner::AgentRunner` shape so legacy callsites
+    /// (`provider::spawn_runner` → UI) work unchanged.
+    ///
+    /// The `signal` is hidden behind an `interject_tx` channel:
+    /// when the UI sends a `()` on the channel, a bridge task
+    /// translates it to `signal.cancel()`. From the run's
+    /// perspective this is a graceful stop request — the loop
+    /// observes the signal at its next turn-boundary check and
+    /// surfaces via AgentEvent::Done.
+    ///
+    /// `interject_tx` capacity 64 matches `runner::spawn_agent`'s
+    /// existing choice — UI hammers the interject keybind during
+    /// long runs and bounded prevents an unbounded queue.
+    pub fn into_agent_runner(self) -> crate::agent::runner::AgentRunner {
+        let (interject_tx, mut interject_rx) = mpsc::channel::<()>(64);
+        let signal_for_bridge = self.signal.clone();
+        // Spawn a small bridge: first interject signal cancels
+        // the loop. Subsequent signals are no-ops (drained).
+        tokio::spawn(async move {
+            if interject_rx.recv().await.is_some() {
+                signal_for_bridge.cancel();
+                // Drain remaining signals so the UI's bounded
+                // channel doesn't backpressure on the second
+                // press.
+                while interject_rx.try_recv().is_ok() {}
+            }
+        });
+        crate::agent::runner::AgentRunner {
+            event_rx: self.event_rx,
+            task: self.task,
+            interject_tx,
+        }
+    }
+}
+
+/// Phase 4.5h-6: convert a `rig::completion::Message` (the shape
+/// `runner::convert_history` produces from a `Session`) to one or
+/// more `LoopMessage`s.
+///
+/// One rig message can map to MULTIPLE loop messages because:
+///   - A `Message::User { content: OneOrMany<UserContent> }` with
+///     `ToolResult` content blocks is rig's representation of a
+///     tool result. In our shape each tool result is its own
+///     `LoopMessage::ToolResult`.
+///   - A `Message::Assistant` with mixed text + tool_call content
+///     stays as one `LoopMessage::Assistant` (the LoopMessage's
+///     content vec carries the mixed blocks).
+///   - `Message::System` is dropped — system content goes to the
+///     `Context.system_prompt`, not the message list.
+pub fn rig_message_to_loop_messages(m: rig::completion::Message) -> Vec<LoopMessage> {
+    use super::message::{AssistantMessage, ContentBlock, StopReason, ToolResultMessage};
+    use rig::completion::message::{AssistantContent, Message, UserContent};
+    match m {
+        Message::System { .. } => Vec::new(),
+        Message::User { content } => {
+            // Walk the OneOrMany. Separate text parts (which
+            // collectively become one User message) from
+            // ToolResult parts (which each become their own
+            // ToolResult message).
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut tool_results: Vec<LoopMessage> = Vec::new();
+            for part in content.into_iter() {
+                match part {
+                    UserContent::Text(t) => text_parts.push(t.text),
+                    UserContent::ToolResult(tr) => {
+                        // Flatten ToolResultContent into a single
+                        // text body. Multi-block tool results are
+                        // rare; rig itself flattens these into a
+                        // text representation downstream.
+                        let body = tr
+                            .content
+                            .into_iter()
+                            .filter_map(|c| match c {
+                                rig::completion::message::ToolResultContent::Text(t) => {
+                                    Some(t.text)
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        tool_results.push(LoopMessage::ToolResult(ToolResultMessage {
+                            tool_call_id: tr.id,
+                            tool_name: String::new(), // not recovered from rig
+                            content: vec![ContentBlock::Text { text: body }],
+                            details: serde_json::Value::Null,
+                            is_error: false,
+                        }));
+                    }
+                    // Image/Audio/Video/Document — rare in dirge's
+                    // history. Drop with a no-op; chat history is
+                    // text-centric.
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            if !text_parts.is_empty() {
+                out.push(LoopMessage::User(UserMessage {
+                    content: text_parts.join("\n"),
+                }));
+            }
+            out.extend(tool_results);
+            out
+        }
+        Message::Assistant { content, .. } => {
+            let mut blocks: Vec<ContentBlock> = Vec::new();
+            for part in content.into_iter() {
+                match part {
+                    AssistantContent::Text(t) => blocks.push(ContentBlock::Text { text: t.text }),
+                    AssistantContent::ToolCall(tc) => {
+                        blocks.push(ContentBlock::ToolCall {
+                            id: tc.id,
+                            name: tc.function.name,
+                            arguments: tc.function.arguments,
+                        });
+                    }
+                    AssistantContent::Reasoning(r) => {
+                        // Flatten Reasoning.content into a
+                        // single text body (matches the same
+                        // strategy as rig_stream.rs).
+                        let text = r
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                rig::completion::message::ReasoningContent::Text {
+                                    text, ..
+                                } => Some(text.clone()),
+                                rig::completion::message::ReasoningContent::Summary(s) => {
+                                    Some(s.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        blocks.push(ContentBlock::Thinking { text });
+                    }
+                    AssistantContent::Image(_) => {}
+                }
+            }
+            if blocks.is_empty() {
+                Vec::new()
+            } else {
+                // Determine stop_reason from content: ToolUse if
+                // any tool call present; Stop otherwise.
+                let has_tool = blocks
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolCall { .. }));
+                let stop_reason = if has_tool {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::Stop
+                };
+                vec![LoopMessage::Assistant(AssistantMessage {
+                    content: blocks,
+                    stop_reason,
+                    error_message: None,
+                })]
+            }
+        }
+    }
+}
+
+/// Convenience: convert a vec of rig messages to a flat
+/// loop-message history. Calls `rig_message_to_loop_messages`
+/// per entry and flattens.
+pub fn rig_history_to_loop_messages(history: Vec<rig::completion::Message>) -> Vec<LoopMessage> {
+    history
+        .into_iter()
+        .flat_map(rig_message_to_loop_messages)
+        .collect()
+}
+
+/// Convenience: extract any system-message content from a rig
+/// history, returning the concatenated text. Used by
+/// `provider::spawn_runner` to merge `Session`-side system
+/// messages (compaction summaries, etc.) into the loop's
+/// `Context.system_prompt`.
+pub fn rig_history_system_prompt(history: &[rig::completion::Message]) -> String {
+    use rig::completion::message::Message;
+    history
+        .iter()
+        .filter_map(|m| match m {
+            Message::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Inputs to `spawn_loop_runner`. Bundled to keep the call sites
 /// readable as the number of optional pieces grows.
 pub struct LoopSpawnConfig {

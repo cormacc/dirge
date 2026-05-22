@@ -340,6 +340,12 @@ pub fn classify_error(msg: &str) -> ErrorKind {
 ///
 /// The original message is appended in parentheses as the cause so
 /// the user (and any bug reports) still have the underlying details.
+///
+/// Transitional after phase 4.5h-6 cutover: no production caller
+/// at the moment. The bridge could pretty-format Error events
+/// using this when h-7 testing surfaces real provider error
+/// shapes; until then keep the helper (and its tests) alive.
+#[allow(dead_code)]
 pub fn user_facing_error(msg: &str, attempts: usize) -> String {
     let kind = classify_error(msg);
     let lower = msg.to_lowercase();
