@@ -30,6 +30,7 @@ pub mod message;
 pub mod plugin_hooks;
 pub mod result;
 pub mod rig_stream;
+pub mod rig_stream_factory;
 pub mod rig_tool;
 pub mod run;
 pub mod steering;
@@ -53,6 +54,9 @@ pub use message::{
 pub use plugin_hooks::{after_hook_from_plugin_manager, before_hook_from_plugin_manager};
 pub use result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 pub use rig_stream::{wrap_rig_stream, wrap_streamed_assistant};
+pub use rig_stream_factory::{
+    loop_tool_to_rig_definition, rig_stream_fn_from_model, value_to_rig_message,
+};
 pub use rig_tool::RigToolAdapter;
 pub use run::{LoopError, run_agent_loop, run_agent_loop_continue, run_loop};
 pub use steering::{steering_from_queue, steering_from_queue_with_sanitizer};
