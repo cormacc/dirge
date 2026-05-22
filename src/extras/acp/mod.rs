@@ -260,6 +260,12 @@ async fn run_prompt(
                 // one does rather than panic on partial state.
                 break;
             }
+            AgentEvent::ContextOverflow { .. } => {
+                // ACP client is expected to set a generous context
+                // window; overflow here means the session is
+                // unsuitable for ACP use. Bail without retrying.
+                break;
+            }
         }
     }
 
