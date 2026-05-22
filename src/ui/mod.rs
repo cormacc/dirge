@@ -3047,22 +3047,65 @@ pub async fn run_interactive(
                 let pre_len = pre.chars().count();
                 let top_fill = BOX_W.saturating_sub(pre_len + 1);
                 let bot_bar = "─".repeat(inner);
-                // Helper: format one row as `│ content (padded) │`
-                // so every row of the alert closes on the right edge.
+                // Helper: pad / clamp one logical line of content into
+                // `│ content │` shape. Caller is responsible for
+                // wrapping long content into multiple logical lines
+                // BEFORE calling this — the helper itself only handles
+                // the chamber-border framing for a single row.
                 let row = |content: &str| -> String {
-                    let chars: Vec<char> = content.chars().collect();
-                    let trimmed: String = if chars.len() <= inner.saturating_sub(2) {
-                        chars.iter().collect()
-                    } else if inner <= 2 {
-                        String::new()
+                    // Display-width-aware padding so embedded emoji
+                    // / wide glyphs / sanitized control replacements
+                    // (`·`) don't drift the right `│`.
+                    let content_w = crate::ui::wrap::visible_width(content);
+                    let cap_w = inner.saturating_sub(1);
+                    let (trimmed, trimmed_w) = if content_w <= cap_w {
+                        (content.to_string(), content_w)
+                    } else if cap_w == 0 {
+                        (String::new(), 0)
                     } else {
-                        let cap = inner.saturating_sub(3);
-                        let mut out: String = chars[..cap].iter().collect();
+                        // Hard fallback if a single token overflowed
+                        // a wrapped chunk (shouldn't happen given the
+                        // soft_wrap pre-pass below, but be defensive).
+                        let mut used = 0usize;
+                        let mut out = String::with_capacity(content.len());
+                        for ch in content.chars() {
+                            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                            if used + w > cap_w.saturating_sub(1) {
+                                break;
+                            }
+                            out.push(ch);
+                            used += w;
+                        }
                         out.push('…');
-                        out
+                        (out, used + 1)
                     };
-                    let pad = inner.saturating_sub(trimmed.chars().count() + 1);
+                    let pad = inner.saturating_sub(trimmed_w + 1);
                     format!("│ {}{}│", trimmed, " ".repeat(pad))
+                };
+
+                // Soft-wrap a labelled value (`label`: `value`) into a
+                // vec of chamber-row-ready strings. First row is
+                // `<label>: <value head>`, continuation rows indent
+                // under the colon so the wrapped tail visually lives
+                // beneath the value column rather than the label
+                // column. Width budget for the wrap = inner - 1 cell
+                // (the trailing right-border pad).
+                //
+                // This is the user-visible fix for the bug report:
+                // the previous alert hard-truncated args at ~50 cells
+                // with `…`, hiding the rest of the command — a
+                // user approving an obscured bash command is being
+                // asked to make a security decision blind.
+                let labelled_rows = |label: &str, value: &str| -> Vec<String> {
+                    let prefix = format!("{} : ", label);
+                    let prefix_w = crate::ui::wrap::visible_width(&prefix);
+                    let cont_indent = " ".repeat(prefix_w);
+                    let budget = inner.saturating_sub(1);
+                    let combined = format!("{}{}", prefix, value);
+                    crate::ui::wrap::soft_wrap(&combined, budget, &cont_indent)
+                        .into_iter()
+                        .map(|chunk| row(&chunk))
+                        .collect()
                 };
                 renderer.write_line(
                     &format!("{}{}╮", pre, "─".repeat(top_fill)),
@@ -3080,8 +3123,12 @@ pub async fn run_interactive(
                 // here for symmetry.
                 let safe_tool = sanitize_output(&ask_req.tool);
                 let safe_input = sanitize_output(&ask_req.input);
-                renderer.write_line(&row(&format!("tool : {}", safe_tool)), c_perm())?;
-                renderer.write_line(&row(&format!("args : {}", safe_input)), c_perm())?;
+                for line in labelled_rows("tool", &safe_tool) {
+                    renderer.write_line(&line, c_perm())?;
+                }
+                for line in labelled_rows("args", &safe_input) {
+                    renderer.write_line(&line, c_perm())?;
+                }
                 renderer.write_line(&format!("├{}┤", bot_bar), c_perm())?;
                 renderer.write_line(
                     &row("[y] allow once  [a] allow always  [n] deny  [ESC] abort"),
