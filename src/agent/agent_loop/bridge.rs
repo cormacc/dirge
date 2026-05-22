@@ -50,7 +50,7 @@ use compact_str::CompactString;
 
 use crate::event::{AgentEvent, ToolContent};
 
-use super::message::{ContentBlock, DeltaPhase, LoopEvent, LoopMessage};
+use super::message::{ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason};
 
 /// Bridges `LoopEvent` stream to `AgentEvent` stream. Stateful
 /// per-run.
@@ -99,13 +99,61 @@ impl EventBridge {
             LoopEvent::AgentStart => Vec::new(),
 
             LoopEvent::AgentEnd { messages } => {
-                // Extract the LAST assistant text as the `response`
-                // payload for `Done`. Pi's agent_end carries
-                // newMessages; dirge's Done carries the final
-                // response string for the UI's terminal render.
-                // Tokens / cost not yet tracked through the loop —
-                // surfaced as 0. Phase 4.5g (recovery wrapper) can
-                // populate from rig usage metadata.
+                // Phase 4.5h-1: classify the run's terminal state
+                // by inspecting the LAST assistant message:
+                //   - stop_reason=Error + context-length signal
+                //     → AgentEvent::ContextOverflow (UI auto-
+                //       compacts and respawns)
+                //   - stop_reason=Error otherwise → AgentEvent::Error
+                //   - stop_reason=Aborted → AgentEvent::Done (the
+                //     UI's existing Interjected event covers
+                //     graceful aborts elsewhere; emit Done with
+                //     empty response so consumers see uniform
+                //     terminal events)
+                //   - any other stop_reason (Stop, ToolUse, Length)
+                //     → AgentEvent::Done with the assembled final
+                //     text
+                //
+                // Pi's agent_end carries newMessages; dirge's Done
+                // carries the final response string for the UI's
+                // terminal render. Tokens / cost not yet tracked
+                // through the loop — surfaced as 0. A future phase
+                // could populate from rig usage metadata.
+                let last_assistant = messages.iter().rev().find_map(|m| match m {
+                    LoopMessage::Assistant(a) => Some(a),
+                    _ => None,
+                });
+                if let Some(a) = last_assistant
+                    && matches!(a.stop_reason, StopReason::Error)
+                {
+                    let error_text = a
+                        .error_message
+                        .as_deref()
+                        .unwrap_or("agent loop produced an error with no message");
+                    let kind = crate::agent::recovery::classify_error(error_text);
+                    return if matches!(kind, crate::agent::recovery::ErrorKind::ContextLength) {
+                        // Extract the user prompt that triggered
+                        // this run. Pi's runAgentLoop puts prompts
+                        // FIRST in newMessages; new_messages[0]
+                        // is the user prompt (or the start of one)
+                        // for typical runs. agentLoopContinue
+                        // starts new_messages empty — fall back to
+                        // empty prompt in that case.
+                        let prompt_text = messages
+                            .iter()
+                            .find_map(|m| match m {
+                                LoopMessage::User(u) => Some(u.content.as_str()),
+                                _ => None,
+                            })
+                            .unwrap_or("");
+                        vec![AgentEvent::ContextOverflow {
+                            prompt: CompactString::from(prompt_text),
+                            error: CompactString::from(error_text),
+                        }]
+                    } else {
+                        vec![AgentEvent::Error(CompactString::from(error_text))]
+                    };
+                }
                 let response = messages
                     .iter()
                     .rev()
@@ -412,6 +460,100 @@ mod tests {
                 assert_eq!(*cost, 0.0);
             }
             _ => panic!("expected Done"),
+        }
+    }
+
+    /// Phase 4.5h-1: AgentEnd carrying an assistant message with
+    /// stop_reason=Error + a context-length error string →
+    /// `AgentEvent::ContextOverflow` (not `Done` or `Error`).
+    /// UI consumes ContextOverflow by running `/compress` and
+    /// respawning a fresh runner with the same prompt against
+    /// the compacted history.
+    #[test]
+    fn agent_end_context_length_error_emits_context_overflow() {
+        let mut bridge = EventBridge::new();
+        let mut a = assistant_with_text("");
+        a.stop_reason = StopReason::Error;
+        a.error_message = Some("prompt is too long: maximum context length exceeded".to_string());
+        let messages = vec![
+            LoopMessage::User(UserMessage {
+                content: "summarize this huge doc".to_string(),
+            }),
+            LoopMessage::Assistant(a),
+        ];
+        let out = bridge.translate(LoopEvent::AgentEnd { messages });
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            AgentEvent::ContextOverflow { prompt, error } => {
+                assert_eq!(prompt.as_str(), "summarize this huge doc");
+                assert!(
+                    error.contains("context length") || error.contains("too long"),
+                    "error text should mention context length"
+                );
+            }
+            other => panic!("expected ContextOverflow, got {other:?}"),
+        }
+    }
+
+    /// Phase 4.5h-1: AgentEnd with stop_reason=Error but NOT a
+    /// context-length signal → `AgentEvent::Error`.
+    #[test]
+    fn agent_end_non_context_error_emits_error() {
+        let mut bridge = EventBridge::new();
+        let mut a = assistant_with_text("");
+        a.stop_reason = StopReason::Error;
+        a.error_message = Some("401 unauthorized: invalid api key".to_string());
+        let messages = vec![
+            LoopMessage::User(UserMessage {
+                content: "hi".to_string(),
+            }),
+            LoopMessage::Assistant(a),
+        ];
+        let out = bridge.translate(LoopEvent::AgentEnd { messages });
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            AgentEvent::Error(msg) => {
+                assert!(msg.contains("unauthorized"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// Phase 4.5h-1: AgentEnd with stop_reason=Error but no
+    /// error_message → still emits Error with a placeholder
+    /// message. Defensive — error variant should never produce
+    /// a misleading Done.
+    #[test]
+    fn agent_end_error_without_message_still_emits_error() {
+        let mut bridge = EventBridge::new();
+        let mut a = assistant_with_text("");
+        a.stop_reason = StopReason::Error;
+        a.error_message = None;
+        let messages = vec![LoopMessage::Assistant(a)];
+        let out = bridge.translate(LoopEvent::AgentEnd { messages });
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], AgentEvent::Error(_)));
+    }
+
+    /// AgentEnd with stop_reason=Aborted → Done with empty
+    /// response. Graceful abort doesn't produce an error event.
+    /// Interjected (the UI's "user said stop") is a runner-level
+    /// concern handled separately.
+    #[test]
+    fn agent_end_aborted_emits_done() {
+        let mut bridge = EventBridge::new();
+        let mut a = assistant_with_text("partial work");
+        a.stop_reason = StopReason::Aborted;
+        let messages = vec![LoopMessage::Assistant(a)];
+        let out = bridge.translate(LoopEvent::AgentEnd { messages });
+        assert_eq!(out.len(), 1);
+        // Done — the loop ended (no Error). Response field carries
+        // whatever text had assembled.
+        match &out[0] {
+            AgentEvent::Done { response, .. } => {
+                assert_eq!(response.as_str(), "partial work");
+            }
+            other => panic!("expected Done, got {other:?}"),
         }
     }
 
