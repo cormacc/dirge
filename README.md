@@ -32,7 +32,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 
 _dirge_ is one of the smallest and most performant coding agents on the market.
 
-- Lines of code: ~12k LoC
+- Lines of code: ~49k LoC
 - Binary size: 12MB
 - RAM footprint: ~8MB on an empty session, ~12MB when working (vs ~300MB for opencode or other JS-based coding agents)
 
@@ -100,10 +100,12 @@ dirge --provider glm       # defaults to glm-4
 # RUST_LOG env still takes precedence if set.
 dirge --verbose
 
-# Pass an API key inline (one-off testing, CI). Prefer env vars
-# in production — `--api-key` is visible to other processes via
-# the process list (`ps`).
-dirge --provider openai --api-key sk-...
+# Pass an API key inline (one-off testing, CI). `--api-key` is
+# visible to other processes via the process list (`ps`) and emits
+# a startup warning. Prefer one of:
+dirge --provider openai --api-key-file /run/secrets/openai_key
+pass openai-key | dirge --provider openai --api-key-stdin
+# or set the provider's env var (e.g. OPENAI_API_KEY) before launch.
 ```
 
 ## Slash commands
@@ -184,7 +186,9 @@ dirge --provider openai --api-key sk-...
 | Feature | Detail |
 |---------|--------|
 | Tool results visible | Default on (`show_tool_details: true`), toggle in config |
-| Smart truncation | Outputs >500 chars truncated with `[N more chars]` indicator (`tool_result_max_chars` in config) |
+| 4-line collapse | Tool result bodies default to the first 4 lines + a dim `↓ N more lines (Ctrl+O to expand)` footer. Configurable via `tool_result_max_lines` (default `4`). Exempt tools — body IS the value — render unchanged: `edit` (colorized diff), `read`, `question`, `task`, `task_status`. |
+| Ctrl+O to expand | Re-prints the most-recent collapsed tool result in full as a fresh chamber. Press again to re-emit. The stash resets on every new user prompt and on context-overflow auto-recovery. |
+| Hard char cap | On top of the line cap, `tool_result_max_chars` (default `500`) trims a single pathological line so a 10 MB minified blob can't blow the chamber. |
 | Colorized edit diffs | `edit` tool results render with `-` (red), `+` (green), `@@` (cyan) coloring (`show_edit_diff: true` in config) |
 
 ## Prompts system
@@ -194,16 +198,31 @@ Built-in prompts that change the agent's behavior and tone:
 | Prompt | Description |
 |--------|-------------|
 | **`code`** (default) | Coding mode with full tool access, TDD workflow |
-| **`plan`** | Planning-only mode — explores and produces a plan (writes restricted to `PLAN.md`) |
-| **`review`** | Code review mode — reviews for correctness, design, testing, and impact |
+| **`plan`** | Planning-only mode — `edit`/`write`/`apply_patch`/`bash`/`webfetch` are denied at the permission layer (via `deny_tools` frontmatter). Plan is delivered as the chat reply; the user saves it to disk if desired. |
+| **`review`** | Code review mode — same deny list as plan; findings delivered in chat |
 | **`debug`** | Debug mode — finds root cause before proposing fixes |
-| **`ask`** | Read-only mode — only read/grep/glob permitted, no writes or bash |
+| **`ask`** | Read-only mode — `edit`/`write`/`apply_patch`/`bash`/`webfetch` denied via deny_tools |
 | **`brainstorm`** | Design-only mode — explores ideas and presents designs without code |
 | **`frontend-design`** | Frontend design mode — distinctive, production-grade UI |
-| **`review-security`** | Security review mode — finds exploitable vulnerabilities |
+| **`review-security`** | Security review mode — same deny list as plan/review; finds exploitable vulnerabilities |
 | **`simplify`** | Code simplification mode — refines for clarity without changing behavior |
 | **`write-prompt`** | Prompt writing mode — creates and optimizes agent prompts |
 | **`default`** | Default system prompt — the base built-in prompt |
+
+Each prompt is a markdown file with optional YAML frontmatter declaring its
+tool restrictions:
+
+```markdown
+---
+deny_tools: [edit, write, apply_patch, bash, webfetch]
+description: Read-only planning mode
+---
+You are dirge in plan mode. …
+```
+
+The permission checker refuses any denied tool BEFORE the call leaves dirge
+— even under `--yolo` mode. Applies symmetrically to MCP tools (matched by
+concrete name, `mcp_tool:<server>:<name>`, and the umbrella `mcp_tool`).
 
 Custom prompts can be placed in `$XDG_CONFIG_HOME/dirge/prompts/` as `.md` files.
 
@@ -275,8 +294,17 @@ Built-in server set:
 | `typescript` | `typescript-language-server --stdio` | `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs` |
 | `pyright` | `pyright-langserver --stdio` | `.py`, `.pyi` |
 | `clojure-lsp` | `clojure-lsp` | `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` |
+| `gopls` | `gopls` | `.go` |
+| `jdtls` | `jdtls` | `.java` |
+| `clangd` | `clangd` | `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, `.hxx`, `.m`, `.mm` |
+| `ruby-lsp` | `ruby-lsp` | `.rb`, `.rake`, `.gemspec` |
+| `bash-language-server` | `bash-language-server start` | `.sh`, `.bash` |
 
-Workspace root resolution is per-server: rust-analyzer walks past nested member crates to the workspace `Cargo.toml` declaring `[workspace]`; typescript stops at the nearest `package.json`/`tsconfig.json` and yields to deno when a `deno.json` is closer; pyright looks for `pyproject.toml`/`setup.py`/etc.; clojure-lsp looks for `deps.edn`/`project.clj`/`shadow-cljs.edn`/`bb.edn`/`.clj-kondo`.
+Missing binaries trip the broken-server backoff (1s → 2s → … capped at 10 min)
+rather than failing dirge — the rest of the session keeps working. Override the
+spawn command per server via the `lsp` config key; see [CONFIG.md](CONFIG.md).
+
+Workspace root resolution is per-server: rust-analyzer walks past nested member crates to the workspace `Cargo.toml` declaring `[workspace]`; typescript stops at the nearest `package.json`/`tsconfig.json` and yields to deno when a `deno.json` is closer; pyright looks for `pyproject.toml`/`setup.py`/etc.; clojure-lsp looks for `deps.edn`/`project.clj`/`shadow-cljs.edn`/`bb.edn`/`.clj-kondo`; gopls follows `go.mod`/`go.work`; jdtls looks for `pom.xml`/`build.gradle`; clangd uses `compile_commands.json`/`CMakeLists.txt`/`Makefile`/`meson.build`; ruby-lsp follows `Gemfile`/`Rakefile`; bash-language-server uses the file's parent.
 
 Disable: `--no-lsp` flag or `{ "lsp": false }` in the config. Per-server overrides (custom command, env, init options) live in the config — see [CONFIG.md](CONFIG.md).
 
@@ -306,7 +334,11 @@ Supports TypeScript/TSX, Python, Clojure (`.clj`/`.cljs`/`.cljc`/`.edn`/`.bb`), 
 | C | `static` storage class = non-exported; extern by default | function/class (struct/enum) /type alias (typedef; suppressed when wrapping a named struct to avoid duplicates) |
 | C++ | `public:` / `private:` / `protected:` access labels tracked through class bodies | class (class/struct) /method (incl. through templates + namespaces) /function (top-level) — namespaces recursed |
 
-C and C++ both claim `.h`; the C adapter is registered first so plain-C headers route through it. C++ projects using C++ headers should adopt `.hpp` / `.hh` / `.hxx` for them.
+C and C++ both claim `.h`. When extracting a `.h` file, dirge sniffs the
+first 32 KiB for C++-only markers (`class `, `namespace `, `template<`, `::`)
+and routes the file to the C++ adapter if any match — so a Qt / libstdc++
+header with classes is parsed correctly without the user having to rename it.
+Pure-C headers fall through to the C adapter as before.
 
 Adding a new language requires writing a Rust `LanguageAdapter` impl (see `src/semantic/adapters/clojure.rs` for a 60-line reference covering the full lifecycle) and gating it behind a new `semantic-<lang>` cargo feature. Tree-sitter Rust bindings don't load grammars dynamically today, so the per-language adapters need to ship in the binary — but users who want their own language can add an adapter in a fork without touching anything outside `src/semantic/`. For runtime-pluggable language intelligence, register an LSP server in `config.json` instead (see the LSP section below) — that's the supported path for languages dirge doesn't bake in.
 

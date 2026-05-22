@@ -1604,6 +1604,22 @@ pub async fn handle_slash(
                 c_result(),
             )?;
             renderer.write_line(
+                "  /prompt plan           switch to plan mode (writes restricted to PLAN.md)",
+                c_result(),
+            )?;
+            renderer.write_line(
+                "  /prompt code           switch back to code mode (full tool access)",
+                c_result(),
+            )?;
+            renderer.write_line(
+                "                         the agent can also suggest plan/code switches via",
+                c_result(),
+            )?;
+            renderer.write_line(
+                "                         plan_enter / plan_exit tools — you confirm each time",
+                c_result(),
+            )?;
+            renderer.write_line(
                 "  /prompt default        activate the 'default' prompt if installed,",
                 c_result(),
             )?;
