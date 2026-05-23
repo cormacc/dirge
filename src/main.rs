@@ -259,18 +259,49 @@ async fn main() -> anyhow::Result<()> {
     // (debug for dirge + warn for plugin hooks) > default
     // (warn, rig silenced). `--verbose` exists primarily so plugin
     // authors can see hook-error logs without having to know the
-    // RUST_LOG syntax. Logs go to stderr; the interactive TUI
-    // captures stdout but leaves stderr passthrough.
+    // RUST_LOG syntax.
+    //
+    // Logs go to a file (`$XDG_STATE_HOME/dirge/dirge.log` →
+    // `~/.local/state/dirge/dirge.log` → `/tmp/dirge.log`). Writing
+    // to stdout/stderr in raw mode would corrupt the TUI: bare `\n`
+    // produces staircase artifacts, and ANY out-of-band write
+    // bypasses ratatui's tracked buffer state — the next diff
+    // emits only the delta from a screen state that no longer
+    // matches reality, leaving visible ghosts (stale panel text,
+    // scrambled titles like `[56P]` for `[MCP]`, duplicate
+    // avatars). Pipe everything to a file so the screen is solely
+    // ratatui's domain.
     let default_filter = if cli.verbose {
         "dirge=debug,dirge::plugin=warn,rig=off"
     } else {
         "warn,rig=off"
+    };
+    let log_path: std::path::PathBuf = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            dirs::home_dir().map(|h| h.join(".local").join("state"))
+        })
+        .map(|base| base.join("dirge"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("dirge.log");
+    let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(std::path::Path::new("/tmp")));
+    let log_writer: Box<dyn std::io::Write + Send + Sync> = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => Box::new(f),
+        // If the log file can't be opened (read-only fs, etc.),
+        // drop trace output entirely rather than spam the TUI.
+        Err(_) => Box::new(std::io::sink()),
     };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
+        .with_writer(std::sync::Mutex::new(log_writer))
+        .with_ansi(false)
         .init();
     let cfg = config::load();
     // Initialize the global UI theme before any rendering happens. The

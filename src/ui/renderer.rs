@@ -266,26 +266,6 @@ impl Renderer {
         use crate::ui::tui::bottom::{AvatarSpec, BottomBody};
         use crate::ui::tui::scene::{Scene, render_frame};
 
-        // TEMP DEBUG: log every redraw + the text we'd paint into the
-        // input box. Tail /tmp/dirge-debug.log to verify the runtime
-        // is calling this path and the cached state is updating.
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/dirge-debug.log")
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                f,
-                "tui_redraw: rows={:?} cur=({},{}) overlay={} running={}",
-                self.cached_input_rows,
-                self.cached_input_cursor_row,
-                self.cached_input_cursor_col,
-                self.alert_overlay.is_some(),
-                self.cached_is_running
-            );
-        }
-
         // panel_visible() borrows &self via terminal_size, so compute
         // it BEFORE we take the split mutable borrow on tui_terminal.
         let show_side_panels = self.panel_visible();
@@ -355,16 +335,26 @@ impl Renderer {
             frame_color,
         };
 
-        let result = terminal.draw(|f| render_frame(&scene, f));
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/dirge-debug.log")
-        {
-            use std::io::Write as _;
-            let _ = writeln!(f, "  terminal.draw result: {:?}", result.is_ok());
-        }
-        result?;
+        // Force a full repaint by clearing ratatui's tracked prev
+        // buffer — without this, anything that writes to the
+        // terminal outside ratatui's draw cycle (stderr in raw mode,
+        // panic messages, tracing logs, plugin/janet prints,
+        // background process output…) leaves the screen state
+        // diverged from ratatui's prev_buffer. Subsequent diffs
+        // only emit changed cells from prev→next, so the divergent
+        // cells persist as visual ghosts: stale "(none)" lines next
+        // to fresh "● clojure-lsp" entries, scrambled panel titles
+        // like "[56P]" instead of "[MCP]", staircase artifacts
+        // below the status row, the works.
+        //
+        // The proper fix is to find and eliminate every direct
+        // stdout/stderr write that bypasses ratatui. Until that's
+        // done, this `clear` keeps the screen consistent at the
+        // cost of repainting every cell each frame (cheap on the
+        // crossterm backend — it's all in-process buffer ops then
+        // one write to stdout).
+        terminal.clear()?;
+        terminal.draw(|f| render_frame(&scene, f))?;
         Ok(())
     }
 
