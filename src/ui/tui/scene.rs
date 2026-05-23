@@ -21,6 +21,9 @@ use super::layout::Layout;
 use super::panels::{LeftPanel, RightPanel};
 use crate::ui::renderer::{LeftPanelInfo, LineEntry, PanelData, SubagentStatusRow};
 
+#[allow(unused_imports)] // RColor stays in scope for the doctest example.
+use ratatui::style::Color as _RColor;
+
 /// All state needed to render one frame.
 ///
 /// Borrowed references throughout so callers don't have to clone
@@ -87,7 +90,7 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
     let mut strip = BottomStrip::new(&layout)
         .status(scene.status)
         .border_style(frame_style)
-        .body(clone_body(&scene.body));
+        .body(scene.body);
     if let Some(avatar) = &scene.avatar {
         strip = strip.avatar(AvatarSpec {
             face: avatar.face,
@@ -97,23 +100,8 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
     f.render_widget(strip, area);
 }
 
-/// `BottomBody` borrows references and isn't Copy; this clones the
-/// metadata while keeping the inner string/slice borrows so the
-/// builder pattern in `render_frame` can move a fresh value.
-fn clone_body<'a>(b: &BottomBody<'a>) -> BottomBody<'a> {
-    match *b {
-        BottomBody::Editor {
-            text,
-            cursor_col,
-            is_running,
-        } => BottomBody::Editor {
-            text,
-            cursor_col,
-            is_running,
-        },
-        BottomBody::Overlay { title, lines } => BottomBody::Overlay { title, lines },
-    }
-}
+// `BottomBody` is Copy so `render_frame` can pass it to BottomStrip
+// directly without a clone helper.
 
 /// Convenience builder for a Scene with sensible defaults — useful
 /// in tests and in early-startup paths where most state is empty.
@@ -221,13 +209,14 @@ mod tests {
     /// the bottom frame — no second box anywhere.
     #[test]
     fn overlay_replaces_input_editor() {
+        use crossterm::style::Color as CC;
         let buf: Vec<LineEntry> = Vec::new();
         let pd = PanelData::default();
         let info = LeftPanelInfo::default();
         let subs: Vec<SubagentStatusRow> = Vec::new();
-        let overlay_lines: Vec<(String, RColor)> = vec![
-            ("⚠ PERMISSION REQUIRED".into(), RColor::Yellow),
-            ("tool: read_file".into(), RColor::Yellow),
+        let overlay_lines: Vec<(String, CC)> = vec![
+            ("⚠ PERMISSION REQUIRED".into(), CC::Yellow),
+            ("tool: read_file".into(), CC::Yellow),
         ];
         let scene = Scene {
             chat_buffer: &buf,

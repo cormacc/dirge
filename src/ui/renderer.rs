@@ -181,6 +181,26 @@ pub struct Renderer {
     /// Animation flip; toggled by `tick_avatar()` so the avatar's
     /// eyes / mouth alternate between two poses per state.
     avatar_tick: bool,
+
+    // ── ratatui migration (Phase 6) ────────────────────────────────
+    /// The ratatui Terminal driving the new paint pipeline. `Option`
+    /// because tests construct Renderer without a real stdout and
+    /// must skip the actual draw call (the legacy paint paths kept
+    /// no terminal handle either — this preserves the same testable
+    /// shape).
+    tui_terminal:
+        Option<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>,
+    /// Cached input editor snapshot used when `write_line` / `write`
+    /// trigger a redraw — they don't have the editor reference at
+    /// hand, but the last `draw_bottom` did. Empty until the first
+    /// `draw_bottom` call.
+    cached_input_text: String,
+    /// Cursor column within the input editor's first visual row.
+    cached_input_cursor: u16,
+    /// Status string from the most recent `draw_bottom` call.
+    cached_status: String,
+    /// `is_running` from the most recent `draw_bottom` call.
+    cached_is_running: bool,
 }
 
 impl Renderer {
@@ -211,7 +231,101 @@ impl Renderer {
             alert_title: String::new(),
             avatar_state: crate::ui::avatar::AvatarState::Idle,
             avatar_tick: false,
+            // ratatui migration (Phase 6). Lazily initialised — if
+            // stdout isn't a terminal the backend still constructs
+            // successfully; `draw` is the call that would fail.
+            tui_terminal: ratatui::Terminal::new(
+                ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+            )
+            .ok(),
+            cached_input_text: String::new(),
+            cached_input_cursor: 0,
+            cached_status: String::new(),
+            cached_is_running: false,
         })
+    }
+
+    /// Phase 6 paint entry point. Builds a `Scene` from current
+    /// Renderer state and calls `render_frame` through the ratatui
+    /// Terminal. Every legacy paint method funnels here.
+    ///
+    /// Returns `Ok(())` (no-op) when no ratatui Terminal was
+    /// initialised — keeps tests that construct `Renderer::new()`
+    /// against captured stdout from blowing up on `draw`.
+    pub(crate) fn tui_redraw(&mut self) -> io::Result<()> {
+        use crate::ui::avatar;
+        use crate::ui::tui::bottom::{AvatarSpec, BottomBody};
+        use crate::ui::tui::scene::{Scene, render_frame};
+
+        // panel_visible() borrows &self via terminal_size, so compute
+        // it BEFORE we take the split mutable borrow on tui_terminal.
+        let show_side_panels = self.panel_visible();
+        let frame_color = crate::ui::theme::header();
+
+        // Split borrows on Self so we can hold &mut tui_terminal
+        // and immutable references to the data fields at the same
+        // time. Rust's borrow checker requires we name each field
+        // we intend to read here.
+        let Self {
+            buffer,
+            scroll_offset,
+            input_rows,
+            panel_data,
+            left_panel_info,
+            subagent_status,
+            alert_overlay,
+            alert_title,
+            avatar_state,
+            avatar_tick,
+            cached_input_text,
+            cached_input_cursor,
+            cached_status,
+            cached_is_running,
+            tui_terminal,
+            ..
+        } = self;
+
+        let Some(terminal) = tui_terminal.as_mut() else {
+            return Ok(());
+        };
+
+        let face = avatar::art(*avatar_state, *avatar_tick);
+        let avatar_color =
+            crate::ui::tui::chat::crossterm_to_ratatui(avatar::color(*avatar_state));
+        let avatar = Some(AvatarSpec {
+            face,
+            color: avatar_color,
+        });
+
+        let body = if let Some(lines) = alert_overlay.as_ref() {
+            BottomBody::Overlay {
+                title: alert_title.as_str(),
+                lines: lines.as_slice(),
+            }
+        } else {
+            BottomBody::Editor {
+                text: cached_input_text.as_str(),
+                cursor_col: *cached_input_cursor,
+                is_running: *cached_is_running,
+            }
+        };
+
+        let scene = Scene {
+            chat_buffer: buffer,
+            scroll_offset: *scroll_offset,
+            input_rows: *input_rows,
+            panel_data,
+            left_info: left_panel_info,
+            subagents: subagent_status,
+            avatar,
+            body,
+            status: cached_status.as_str(),
+            show_side_panels,
+            frame_color,
+        };
+
+        terminal.draw(|f| render_frame(&scene, f))?;
+        Ok(())
     }
 
     /// dirge-ov2: append a new chat (typically a subagent) with the
@@ -786,6 +900,15 @@ impl Renderer {
     }
 
     pub fn render_viewport(&mut self) -> io::Result<()> {
+        // ratatui path: a full repaint uses the cached input + status
+        // from the most recent draw_bottom. No direct stdout writes,
+        // no ScrollUp (the chat is just a buffer slice the widget
+        // windows).
+        return self.tui_redraw();
+
+        // ── legacy direct-stdout viewport (dead) ──────────────────
+        #[allow(unreachable_code, unused_variables, unused_mut)]
+        {
         let (cols, rows) = self.terminal_size();
         let content_cols = self.content_cols();
         let visible = rows
@@ -1022,6 +1145,7 @@ impl Renderer {
 
         stdout.flush()?;
         Ok(())
+        } // end legacy block
     }
 
     /// dirge-gek: paint the subagent overview in the left gutter.
@@ -1227,7 +1351,6 @@ impl Renderer {
     pub fn write_line(&mut self, text: &str, color: Color) -> io::Result<()> {
         self.commit_partial();
         let max_width = self.max_line_width();
-        let indent = self.content_indent();
         for segment in text.split('\n') {
             let wrapped = self.wrap_line(segment, max_width);
             for chunk in &wrapped {
@@ -1235,58 +1358,13 @@ impl Renderer {
                     text: chunk.clone(),
                     color,
                 });
-                if self.scroll_offset == 0 {
-                    self.ensure_room();
-                    let mut stdout = io::stdout();
-                    // Hide cursor so streaming agent output doesn't drag the
-                    // hardware cursor across the chat area; draw_bottom shows
-                    // it again at the input prompt.
-                    stdout.execute(Hide)?;
-                    let r = self.content_row();
-                    stdout.execute(MoveTo(0, r))?;
-                    stdout.execute(Clear(ClearType::CurrentLine))?;
-                    // Indent so the directly-painted line matches the
-                    // centered layout that `render_viewport` produces.
-                    // Without this, the streaming path writes at col 0
-                    // and the chat visibly jumps from centered (after
-                    // a render_viewport repaint) to left-aligned
-                    // (immediately after each write).
-                    if indent > 0 {
-                        write!(stdout, "{}", " ".repeat(indent))?;
-                    }
-                    // Bold-glow for bright tones so streamed text
-                    // reads the same as the post-redraw render_viewport
-                    // path. Without this, streaming chunks look flat
-                    // until the next full repaint shifts them to the
-                    // bright/bold weight.
-                    let bloom = crate::ui::theme::is_bright(color);
-                    if bloom {
-                        write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
-                    }
-                    write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                    // dirge-ypg: emit CRLF, not bare LF. In raw mode
-                    // (enable_raw_mode disables OPOST/ONLCR) a bare
-                    // `\n` is just LF — cursor moves down one row but
-                    // the column stays where the chunk ended. Even
-                    // though the NEXT write_line call MoveTo(0, r)s
-                    // first, some terminals (or buffer-flush
-                    // interleavings) drop characters in the gap and
-                    // the user sees a staircase on subsequent
-                    // streamed text. Explicit `\r\n` resets the col
-                    // immediately so the cursor is in a known state
-                    // regardless of what follows.
-                    write!(stdout, "{}\r\n", chunk)?;
-                    if bloom {
-                        write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
-                    }
-                    write!(stdout, "{}", ResetColor)?;
-                    self.lines = self.lines.saturating_add(1);
-                    self.col = 0;
-                }
             }
         }
+        // ratatui path: state is mutated above; the redraw repaints
+        // the full chat region (no per-line direct stdout writes,
+        // no Clear(CurrentLine) wiping side-panel cols).
         if self.scroll_offset == 0 {
-            io::stdout().flush()?;
+            self.tui_redraw()?;
         }
         Ok(())
     }
@@ -1299,16 +1377,13 @@ impl Renderer {
         if max_width == 0 {
             return Ok(());
         }
-        // Hide cursor for the duration of this streamed write; draw_bottom
-        // is the only place that re-shows it at the input prompt.
-        if self.scroll_offset == 0 {
-            io::stdout().execute(Hide)?;
-        }
-        // Same centering offset render_viewport / write_line use.
-        // Without this the streaming token path paints at col 0 while
-        // the rest of the chat is centered — content jumps left as it
-        // streams and back to center on the next full repaint.
-        let indent = self.content_indent() as u16;
+        // ratatui path: token-by-token streaming just appends to the
+        // partial line buffer + commits on newlines / wrap. The
+        // ratatui Buffer diff handles which cells actually changed;
+        // no direct stdout writes, no per-token MoveTo, no manual
+        // CRLF handling, no Clear(CurrentLine) collateral on side
+        // panels. Soft-wrap math stays here so wrapped-line counts
+        // remain consistent with render math.
         let parts: Vec<&str> = text.split('\n').collect();
         let last = parts.len() - 1;
         for (i, segment) in parts.iter().enumerate() {
@@ -1326,36 +1401,7 @@ impl Renderer {
                         color,
                     });
                 }
-                if self.scroll_offset == 0 {
-                    self.ensure_room();
-                    let mut stdout = io::stdout();
-                    let r = self.content_row();
-                    stdout.execute(MoveTo(indent + self.col, r))?;
-                    if !segment.is_empty() {
-                        let bloom = crate::ui::theme::is_bright(color);
-                        if bloom {
-                            write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
-                        }
-                        write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                        write!(stdout, "{}", segment)?;
-                        if bloom {
-                            write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
-                        }
-                        write!(stdout, "{}", ResetColor)?;
-                    }
-                    // dirge-ypg: emit CRLF, not bare LF — same
-                    // reasoning as the write_line site above. User
-                    // hit the staircase on the reasoning stream
-                    // path (`AgentEvent::Reasoning` routes through
-                    // this function); each chunk's trailing LF in
-                    // raw mode moved the cursor down without
-                    // resetting the column, and subsequent chunks
-                    // landed at the prior end-col. Explicit `\r\n`
-                    // resets col immediately.
-                    write!(stdout, "\r\n")?;
-                    self.lines = self.lines.saturating_add(1);
-                    self.col = 0;
-                }
+                self.col = 0;
             } else if !segment.is_empty() {
                 let chars: Vec<char> = segment.chars().collect();
                 let mut idx = 0;
@@ -1363,46 +1409,27 @@ impl Renderer {
                     let avail = max_width.saturating_sub(self.col as usize);
                     if avail == 0 {
                         self.commit_partial();
-                        if self.scroll_offset == 0 {
-                            self.lines = self.lines.saturating_add(1);
-                            self.col = 0;
-                        }
+                        self.col = 0;
                         continue;
                     }
                     let end = (idx + avail).min(chars.len());
                     let chunk: String = chars[idx..end].iter().collect();
                     self.partial_color = color;
                     self.partial.push_str(&chunk);
-                    if self.scroll_offset == 0 {
-                        self.ensure_room();
-                        let mut stdout = io::stdout();
-                        let r = self.content_row();
-                        stdout.execute(MoveTo(indent + self.col, r))?;
-                        let bloom = crate::ui::theme::is_bright(color);
-                        if bloom {
-                            write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
-                        }
-                        write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                        write!(stdout, "{}", chunk)?;
-                        if bloom {
-                            write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
-                        }
-                        write!(stdout, "{}", ResetColor)?;
-                        self.col = self.col.saturating_add(chunk.chars().count() as u16);
-                    }
+                    self.col = self.col.saturating_add(chunk.chars().count() as u16);
                     idx = end;
                     if idx < chars.len() {
                         self.commit_partial();
-                        if self.scroll_offset == 0 {
-                            self.lines = self.lines.saturating_add(1);
-                            self.col = 0;
-                        }
+                        self.col = 0;
                     }
                 }
             }
         }
+        // Single redraw at the end of the streamed batch — repeated
+        // tokens within the batch land in the buffer + partial, and
+        // the diff engine in ratatui only emits cells that changed.
         if self.scroll_offset == 0 {
-            io::stdout().flush()?;
+            self.tui_redraw()?;
         }
         Ok(())
     }
@@ -1427,6 +1454,45 @@ impl Renderer {
         status: &str,
         is_running: bool,
     ) -> io::Result<()> {
+        // ratatui path (Phase 6): cache the editor + status snapshot
+        // so write_line / write / render_viewport can redraw later
+        // without an editor reference, then trigger a full repaint.
+        use unicode_width::UnicodeWidthStr;
+        let full = editor.buffer.as_str();
+        let cursor_byte = editor.cursor.min(full.len());
+        // For single-row input the cursor's display col is the
+        // display width of buffer up to the cursor byte position
+        // on the FIRST logical line. Multi-line wrap is a follow-up.
+        let first_line_end = full.find('\n').unwrap_or(full.len());
+        let line0 = &full[..first_line_end];
+        let cursor_in_line0 = cursor_byte.min(first_line_end);
+        let cursor_col = UnicodeWidthStr::width(&line0[..cursor_in_line0]) as u16;
+
+        self.cached_input_text = line0.to_string();
+        self.cached_input_cursor = cursor_col;
+        self.cached_status = status.to_string();
+        self.cached_is_running = is_running;
+        // Also update input_rows from the editor so the layout
+        // accounts for multi-line input even though we only paint
+        // row 0 for now. wrap_input would give the precise count;
+        // approximate by `lines + 1` for newlines.
+        let logical_rows = (full.matches('\n').count() as u16).saturating_add(1);
+        self.input_rows = logical_rows.clamp(1, MAX_INPUT_VISIBLE_LINES as u16);
+
+        if is_running {
+            self.spinner_tick = !self.spinner_tick;
+            self.avatar_tick = !self.avatar_tick;
+        }
+
+        self.tui_redraw()?;
+        return Ok(());
+
+        // ── legacy direct-stdout paint (dead) ─────────────────────
+        // Kept temporarily; deleted in sub-phase 6c once the ratatui
+        // path is verified at runtime. Wrapped in unreachable_code
+        // to silence the warning.
+        #[allow(unreachable_code, unused_variables)]
+        {
         let (_, rows) = crossterm::terminal::size()?;
         // Width available for input/status content. When the info panel is
         // visible this is smaller than terminal width — using it everywhere
@@ -1830,6 +1896,7 @@ impl Renderer {
         stdout.execute(Show)?;
         stdout.flush()?;
         Ok(())
+        } // end legacy block
     }
 
     /// Paint the bottom-left ASCII avatar at cols `0..AVATAR_W`, in the

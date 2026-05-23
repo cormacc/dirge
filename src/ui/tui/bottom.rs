@@ -19,7 +19,9 @@ use ratatui::widgets::Widget;
 
 use super::layout::Layout;
 
-/// What the input frame currently shows.
+/// What the input frame currently shows. `Copy` so it can be
+/// captured in a `Scene` without explicit cloning.
+#[derive(Clone, Copy)]
 pub enum BottomBody<'a> {
     /// User input editor. `cursor_col` is the cursor's offset from
     /// the start of the inner band (after the prompt prefix) — the
@@ -31,10 +33,12 @@ pub enum BottomBody<'a> {
     },
     /// Modal overlay replacing the editor. `title` shows in the
     /// frame's top border (e.g. `[ALERT]`); `lines` paint inside
-    /// the inner band, one per row.
+    /// the inner band, one per row. Colors are crossterm-flavored
+    /// (matches the rest of the renderer state) — converted to
+    /// ratatui at paint time.
     Overlay {
         title: &'a str,
-        lines: &'a [(String, RColor)],
+        lines: &'a [(String, crossterm::style::Color)],
     },
 }
 
@@ -295,7 +299,7 @@ fn paint_overlay_box(
     buf: &mut Buffer,
     area: Rect,
     title: &str,
-    lines: &[(String, RColor)],
+    lines: &[(String, crossterm::style::Color)],
     style: Style,
 ) {
     paint_frame(buf, area, Some(title), style);
@@ -307,7 +311,7 @@ fn paint_overlay_box(
             // Center each line horizontally within the inner band.
             let tw = text.chars().count();
             let pad = inner_w.saturating_sub(tw) / 2;
-            let st = Style::default().fg(*color);
+            let st = Style::default().fg(super::chat::crossterm_to_ratatui(*color));
             buf.set_stringn(area.x + 1 + pad as u16, y, text, inner_w - pad, st);
         }
     }
@@ -428,10 +432,11 @@ mod tests {
     /// painted inside. Replaces the editor — no second box.
     #[test]
     fn input_box_overlay_replaces_editor() {
+        use crossterm::style::Color as CC;
         let layout = Layout::new(160, 30, 1);
         let lines = vec![
-            ("⚠ PERMISSION REQUIRED".to_string(), RColor::Yellow),
-            ("tool: read_file".to_string(), RColor::Yellow),
+            ("⚠ PERMISSION REQUIRED".to_string(), CC::Yellow),
+            ("tool: read_file".to_string(), CC::Yellow),
         ];
         let mut backend = TestBackend::new(160, 30);
         let mut terminal = Terminal::new(backend.clone()).unwrap();
