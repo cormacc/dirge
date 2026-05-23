@@ -19,3 +19,5 @@
 // warning will go away as those phases land.
 #[allow(dead_code)]
 pub mod layout;
+#[allow(dead_code)]
+pub mod frame;
