@@ -23,11 +23,14 @@ use super::layout::Layout;
 /// captured in a `Scene` without explicit cloning.
 #[derive(Clone, Copy)]
 pub enum BottomBody<'a> {
-    /// User input editor. `cursor_col` is the cursor's offset from
-    /// the start of the inner band (after the prompt prefix) — the
-    /// widget paints the cursor at `input_box.x + cursor_col`.
+    /// User input editor. Pre-wrapped into one string per visual
+    /// row — caller is responsible for splitting on newlines AND
+    /// soft-wrapping long logical lines to the input box's inner
+    /// width. `cursor_row` and `cursor_col` locate the cursor
+    /// inside `rows` (rows[cursor_row], display col 0-based).
     Editor {
-        text: &'a str,
+        rows: &'a [String],
+        cursor_row: u16,
         cursor_col: u16,
         is_running: bool,
     },
@@ -96,14 +99,13 @@ impl<'a> Widget for BottomStrip<'a> {
         paint_avatar_box(buf, l.avatar_box, self.avatar.as_ref(), self.border_style);
         match self.body.as_ref() {
             Some(BottomBody::Editor {
-                text,
-                cursor_col,
+                rows,
                 is_running,
+                ..
             }) => paint_editor_box(
                 buf,
                 l.input_box,
-                text,
-                *cursor_col,
+                rows,
                 *is_running,
                 self.border_style,
             ),
@@ -262,8 +264,7 @@ fn paint_empty_box(buf: &mut Buffer, area: Rect, style: Style) {
 fn paint_editor_box(
     buf: &mut Buffer,
     area: Rect,
-    text: &str,
-    cursor_col: u16,
+    rows: &[String],
     is_running: bool,
     style: Style,
 ) {
@@ -272,24 +273,25 @@ fn paint_editor_box(
         return;
     }
     let inner_w = area.width as usize - 2;
-    // First inner row (just below the top border).
-    let y = area.y + 1;
-    // Prompt prefix.
-    let prompt = if is_running { "░▌ " } else { "▌▌ " };
+    let prompt_main = if is_running { "░▌ " } else { "▌▌ " };
+    // Continuation prompt — a single dim glyph + spaces — so wrapped
+    // lines visually attach to the prompt above without taking
+    // another bold spinner.
+    let prompt_cont = "▏  ";
+    let prompt_w = 3_usize; // both prompts are 3 cells
     let accent = Style::default().fg(RColor::Yellow);
     let user = Style::default().fg(RColor::White);
-    buf.set_stringn(area.x + 1, y, prompt, inner_w, accent);
-    // Editor text after the prompt.
-    let prompt_w = prompt.chars().count() as u16;
-    let text_x = area.x + 1 + prompt_w;
-    let text_avail = inner_w.saturating_sub(prompt_w as usize);
-    buf.set_stringn(text_x, y, text, text_avail, user);
-
-    // Cursor is shown via `Frame::set_cursor_position` at the
-    // render-frame layer (so it blinks naturally). The widget only
-    // owns text + style; it doesn't try to fake the cursor with an
-    // inverted-bg cell anymore.
-    let _ = cursor_col;
+    let text_avail = inner_w.saturating_sub(prompt_w);
+    let visible_rows = (area.height as usize).saturating_sub(2);
+    for (i, row_text) in rows.iter().take(visible_rows).enumerate() {
+        let y = area.y + 1 + i as u16;
+        let prompt = if i == 0 { prompt_main } else { prompt_cont };
+        buf.set_stringn(area.x + 1, y, prompt, inner_w, accent);
+        let text_x = area.x + 1 + prompt_w as u16;
+        buf.set_stringn(text_x, y, row_text, text_avail, user);
+    }
+    // Cursor positioning is owned by render_frame via
+    // Frame::set_cursor_position.
 }
 
 fn paint_overlay_box(
@@ -402,13 +404,22 @@ mod tests {
     #[test]
     fn input_box_paints_editor() {
         let layout = Layout::new(160, 30, 1);
-        let backend = render(160, 30, 1, |l| {
-            BottomStrip::new(l).body(BottomBody::Editor {
-                text: "hi",
-                cursor_col: 2,
-                is_running: false,
+        let rows: Vec<String> = vec!["hi".to_string()];
+        let mut backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend.clone()).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let widget = BottomStrip::new(&layout).body(BottomBody::Editor {
+                    rows: &rows,
+                    cursor_row: 0,
+                    cursor_col: 2,
+                    is_running: false,
+                });
+                f.render_widget(widget, area);
             })
-        });
+            .unwrap();
+        backend = terminal.backend().clone();
         let area = layout.input_box;
         // Top row: ╭───────╮ (no title).
         let top = row_chars(&backend, area.y, area.x, area.width);

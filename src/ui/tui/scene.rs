@@ -98,32 +98,46 @@ pub fn render_frame(scene: &Scene, f: &mut Frame<'_>) {
     }
     f.render_widget(strip, area);
 
-    // Show the hardware cursor at the editor position. The terminal
-    // blinks it naturally — much clearer feedback than the
-    // inverted-bg cell trick the widget used during the migration.
-    if let BottomBody::Editor { cursor_col, .. } = scene.body {
-        let prompt_w: u16 = 3; // "▌▌ " or "░▌ "; both 3 cells.
+    // Show the hardware cursor at the editor's (row, col). The
+    // terminal blinks it naturally.
+    if let BottomBody::Editor {
+        cursor_row,
+        cursor_col,
+        ..
+    } = scene.body
+    {
+        let prompt_w: u16 = 3; // both prompts are 3 cells
         let cursor_x = layout
             .input_box
             .x
             .saturating_add(1) // skip the │ border
             .saturating_add(prompt_w)
             .saturating_add(cursor_col);
-        let cursor_y = layout.input_box.y.saturating_add(1); // skip top frame row
-        // Clamp inside the input box so a long line doesn't put the
-        // cursor in the right margin.
+        let cursor_y = layout
+            .input_box
+            .y
+            .saturating_add(1)
+            .saturating_add(cursor_row);
         let cursor_x_max = layout
             .input_box
             .x
             .saturating_add(layout.input_box.width)
-            .saturating_sub(2); // -1 for the right │, -1 for 0-based
-        let cursor_x = cursor_x.min(cursor_x_max);
-        f.set_cursor_position((cursor_x, cursor_y));
+            .saturating_sub(2);
+        let cursor_y_max = layout
+            .input_box
+            .y
+            .saturating_add(layout.input_box.height)
+            .saturating_sub(2);
+        f.set_cursor_position((cursor_x.min(cursor_x_max), cursor_y.min(cursor_y_max)));
     }
 }
 
 // `BottomBody` is Copy so `render_frame` can pass it to BottomStrip
 // directly without a clone helper.
+
+/// Single empty editor row, used as the default `rows` slice when
+/// no input has been typed yet.
+pub const EMPTY_ROWS: &[String] = &[];
 
 /// Convenience builder for a Scene with sensible defaults — useful
 /// in tests and in early-startup paths where most state is empty.
@@ -143,7 +157,8 @@ pub fn empty_scene<'a>(
         subagents,
         avatar: None,
         body: BottomBody::Editor {
-            text: "",
+            rows: EMPTY_ROWS,
+            cursor_row: 0,
             cursor_col: 0,
             is_running: false,
         },
@@ -360,7 +375,8 @@ mod tests {
             subagents: &subs,
             avatar: None,
             body: BottomBody::Editor {
-                text: "",
+                rows: EMPTY_ROWS,
+                cursor_row: 0,
                 cursor_col: 0,
                 is_running: false,
             },
@@ -371,6 +387,7 @@ mod tests {
         terminal.draw(|f| render_frame(&s1, f)).unwrap();
 
         // Second draw: "hello" typed.
+        let hello_rows: Vec<String> = vec!["hello".to_string()];
         let s2 = Scene {
             chat_buffer: &buf,
             scroll_offset: 0,
@@ -380,7 +397,8 @@ mod tests {
             subagents: &subs,
             avatar: None,
             body: BottomBody::Editor {
-                text: "hello",
+                rows: &hello_rows,
+                cursor_row: 0,
                 cursor_col: 5,
                 is_running: false,
             },

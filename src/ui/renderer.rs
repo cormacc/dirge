@@ -196,11 +196,15 @@ pub struct Renderer {
         Option<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>,
     /// Cached input editor snapshot used when `write_line` / `write`
     /// trigger a redraw — they don't have the editor reference at
-    /// hand, but the last `draw_bottom` did. Empty until the first
-    /// `draw_bottom` call.
-    cached_input_text: String,
-    /// Cursor column within the input editor's first visual row.
-    cached_input_cursor: u16,
+    /// hand, but the last `draw_bottom` did. Stored as pre-wrapped
+    /// rows (one per visual line) so the widget can render multi-
+    /// line input without re-wrapping each frame.
+    cached_input_rows: Vec<String>,
+    /// Cursor row within `cached_input_rows`.
+    cached_input_cursor_row: u16,
+    /// Cursor column on `cached_input_rows[cached_input_cursor_row]`,
+    /// in display cells.
+    cached_input_cursor_col: u16,
     /// Status string from the most recent `draw_bottom` call.
     cached_status: String,
     /// `is_running` from the most recent `draw_bottom` call.
@@ -242,34 +246,15 @@ impl Renderer {
                 ratatui::backend::CrosstermBackend::new(std::io::stdout()),
             )
             .ok(),
-            cached_input_text: String::new(),
-            cached_input_cursor: 0,
+            cached_input_rows: vec![String::new()],
+            cached_input_cursor_row: 0,
+            cached_input_cursor_col: 0,
             cached_status: String::new(),
             cached_is_running: false,
         })
     }
 
-    /// Build a `Scene` snapshot from current renderer state.
-    /// Extracted from `tui_redraw` so tests can inspect the scene
-    /// without driving the actual ratatui Terminal.
-    #[cfg(test)]
-    pub(crate) fn build_test_scene(
-        &self,
-    ) -> (
-        String,
-        u16,
-        bool,
-        bool,
-    ) {
-        (
-            self.cached_input_text.clone(),
-            self.cached_input_cursor,
-            self.cached_is_running,
-            self.alert_overlay.is_some(),
-        )
-    }
-
-    /// Phase 6 paint entry point. Builds a `Scene` from current
+/// Phase 6 paint entry point. Builds a `Scene` from current
     /// Renderer state and calls `render_frame` through the ratatui
     /// Terminal. Every legacy paint method funnels here.
     ///
@@ -283,7 +268,7 @@ impl Renderer {
 
         // TEMP DEBUG: log every redraw + the text we'd paint into the
         // input box. Tail /tmp/dirge-debug.log to verify the runtime
-        // is calling this path and the cached_input_text is updating.
+        // is calling this path and the cached state is updating.
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -292,9 +277,10 @@ impl Renderer {
             use std::io::Write as _;
             let _ = writeln!(
                 f,
-                "tui_redraw: text={:?} cursor={} overlay={} running={}",
-                self.cached_input_text,
-                self.cached_input_cursor,
+                "tui_redraw: rows={:?} cur=({},{}) overlay={} running={}",
+                self.cached_input_rows,
+                self.cached_input_cursor_row,
+                self.cached_input_cursor_col,
                 self.alert_overlay.is_some(),
                 self.cached_is_running
             );
@@ -320,8 +306,9 @@ impl Renderer {
             alert_title,
             avatar_state,
             avatar_tick,
-            cached_input_text,
-            cached_input_cursor,
+            cached_input_rows,
+            cached_input_cursor_row,
+            cached_input_cursor_col,
             cached_status,
             cached_is_running,
             tui_terminal,
@@ -347,8 +334,9 @@ impl Renderer {
             }
         } else {
             BottomBody::Editor {
-                text: cached_input_text.as_str(),
-                cursor_col: *cached_input_cursor,
+                rows: cached_input_rows.as_slice(),
+                cursor_row: *cached_input_cursor_row,
+                cursor_col: *cached_input_cursor_col,
                 is_running: *cached_is_running,
             }
         };
@@ -1061,30 +1049,18 @@ impl Renderer {
         status: &str,
         is_running: bool,
     ) -> io::Result<()> {
-        // ratatui path (Phase 6): cache the editor + status snapshot
-        // so write_line / write / render_viewport can redraw later
-        // without an editor reference, then trigger a full repaint.
-        use unicode_width::UnicodeWidthStr;
         let full = editor.buffer.as_str();
         let cursor_byte = editor.cursor.min(full.len());
-        // For single-row input the cursor's display col is the
-        // display width of buffer up to the cursor byte position
-        // on the FIRST logical line. Multi-line wrap is a follow-up.
-        let first_line_end = full.find('\n').unwrap_or(full.len());
-        let line0 = &full[..first_line_end];
-        let cursor_in_line0 = cursor_byte.min(first_line_end);
-        let cursor_col = UnicodeWidthStr::width(&line0[..cursor_in_line0]) as u16;
-
-        self.cached_input_text = line0.to_string();
-        self.cached_input_cursor = cursor_col;
+        // Wrap to chat-content width minus 3 cols of prompt prefix.
+        let wrap_w = self.content_width().saturating_sub(3).max(1);
+        let (rows, cursor_row, cursor_col) = wrap_editor(full, cursor_byte, wrap_w);
+        let total_rows = rows.len() as u16;
+        self.cached_input_rows = rows;
+        self.cached_input_cursor_row = cursor_row;
+        self.cached_input_cursor_col = cursor_col;
         self.cached_status = status.to_string();
         self.cached_is_running = is_running;
-        // Also update input_rows from the editor so the layout
-        // accounts for multi-line input even though we only paint
-        // row 0 for now. wrap_input would give the precise count;
-        // approximate by `lines + 1` for newlines.
-        let logical_rows = (full.matches('\n').count() as u16).saturating_add(1);
-        self.input_rows = logical_rows.clamp(1, MAX_INPUT_VISIBLE_LINES as u16);
+        self.input_rows = total_rows.clamp(1, MAX_INPUT_VISIBLE_LINES as u16);
 
         if is_running {
             self.spinner_tick = !self.spinner_tick;
@@ -1221,6 +1197,72 @@ pub(crate) fn display_col_to_char_index(s: &str, display_col: usize) -> usize {
 /// overflows. Useful for paths where the filename matters more than
 /// the prefix: `…clj/yourname/foo.rs` reads better than `src/clj/…`.
 /// Returns the input verbatim when `s` fits in `max` chars.
+/// Wrap the input editor's buffer into visual rows + locate the
+/// cursor. Splits on `\n` (logical lines), then soft-wraps each
+/// logical line to `wrap_w` display cells. Returns the wrapped
+/// rows and the cursor's (row, col) position within them.
+///
+/// `cursor_byte` is the byte offset into `full`; conversion to
+/// display cells handles multi-byte UTF-8 (the cursor column is
+/// the display width of the row prefix up to the byte).
+fn wrap_editor(full: &str, cursor_byte: usize, wrap_w: usize) -> (Vec<String>, u16, u16) {
+    use unicode_width::UnicodeWidthChar;
+    let wrap_w = wrap_w.max(1);
+    let mut rows: Vec<String> = Vec::new();
+    let mut cursor_row: u16 = 0;
+    let mut cursor_col: u16 = 0;
+    let cursor_byte = cursor_byte.min(full.len());
+
+    let mut byte_idx: usize = 0;
+    for logical in full.split('\n') {
+        // Soft-wrap by display width. Walk chars, accumulating
+        // width — start a new row when adding the next char would
+        // exceed `wrap_w`.
+        let logical_start = byte_idx;
+        let mut cur_row = String::new();
+        let mut cur_w: usize = 0;
+        let mut local_byte: usize = 0;
+        for ch in logical.chars() {
+            let w = ch.width().unwrap_or(0);
+            if cur_w + w > wrap_w && !cur_row.is_empty() {
+                // Check cursor before flushing the row.
+                let row_start_byte = logical_start + local_byte - cur_row.len();
+                let row_end_byte = row_start_byte + cur_row.len();
+                if cursor_byte >= row_start_byte && cursor_byte <= row_end_byte {
+                    cursor_row = rows.len() as u16;
+                    let prefix_end = cursor_byte - row_start_byte;
+                    cursor_col = unicode_width::UnicodeWidthStr::width(
+                        &cur_row.as_str()[..prefix_end.min(cur_row.len())],
+                    ) as u16;
+                }
+                rows.push(std::mem::take(&mut cur_row));
+                cur_w = 0;
+            }
+            cur_row.push(ch);
+            cur_w += w;
+            local_byte += ch.len_utf8();
+        }
+        // Cursor on the (last) row of this logical line?
+        let row_start_byte = logical_start + local_byte - cur_row.len();
+        let row_end_byte = row_start_byte + cur_row.len();
+        if cursor_byte >= row_start_byte && cursor_byte <= row_end_byte {
+            cursor_row = rows.len() as u16;
+            let prefix_end = cursor_byte - row_start_byte;
+            cursor_col = unicode_width::UnicodeWidthStr::width(
+                &cur_row.as_str()[..prefix_end.min(cur_row.len())],
+            ) as u16;
+        }
+        rows.push(cur_row);
+        // Advance past this logical line + the '\n'.
+        byte_idx += logical.len() + 1;
+    }
+
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    (rows, cursor_row, cursor_col)
+}
+
 // Used by the legacy modified-files panel; the new SubPanel widget
 // doesn't truncate paths the same way (set_stringn clips at width).
 // Kept because multi-line input wrap will likely need a similar
@@ -1294,6 +1336,45 @@ pub fn copy_to_clipboard(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// wrap_editor: empty buffer → one empty row, cursor at (0, 0).
+    #[test]
+    fn wrap_editor_empty() {
+        let (rows, r, c) = wrap_editor("", 0, 80);
+        assert_eq!(rows, vec![String::new()]);
+        assert_eq!((r, c), (0, 0));
+    }
+
+    /// wrap_editor: short single-line text doesn't wrap.
+    #[test]
+    fn wrap_editor_no_wrap_short() {
+        let (rows, r, c) = wrap_editor("hello", 5, 80);
+        assert_eq!(rows, vec!["hello".to_string()]);
+        assert_eq!((r, c), (0, 5));
+    }
+
+    /// wrap_editor: hard newlines split into logical rows.
+    #[test]
+    fn wrap_editor_newlines_split() {
+        let (rows, r, c) = wrap_editor("a\nb\ncc", 5, 80);
+        assert_eq!(rows, vec!["a".to_string(), "b".to_string(), "cc".to_string()]);
+        // Cursor at byte 5 = "cc" position 1.
+        assert_eq!((r, c), (2, 1));
+    }
+
+    /// wrap_editor: long line soft-wraps to wrap_w cells. Cursor
+    /// lands on the wrapped row.
+    #[test]
+    fn wrap_editor_soft_wrap() {
+        let s = "abcdefghij"; // 10 chars
+        let (rows, r, c) = wrap_editor(s, 10, 4);
+        // Wrap to 4 cells: ["abcd", "efgh", "ij"] (cursor at end).
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], "abcd");
+        assert_eq!(rows[1], "efgh");
+        assert_eq!(rows[2], "ij");
+        assert_eq!((r, c), (2, 2));
+    }
 
     /// dirge-ov2 Phase A: chat switching saves the prior chat's
     /// buffer and selection, then loads the target chat's snapshot.
