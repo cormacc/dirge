@@ -744,6 +744,35 @@ pub async fn build_loop_tools(
         }
     }
 
+    // Plugin-registered tools (P9a). The global PluginManager owns
+    // the registry; we snapshot it once here and wrap each entry as
+    // a `JanetLoopTool`. Built-in names take priority — a plugin
+    // can't shadow `read` etc. — matching pi's extension precedence
+    // (extensions/runner.ts:`registerTool` rejects duplicates of the
+    // core tool list).
+    #[cfg(feature = "plugin")]
+    if let Some(pm_arc) = crate::plugin::hook::global() {
+        let metas: Vec<crate::plugin::PluginToolMeta> = match pm_arc.lock() {
+            Ok(mut guard) => guard.list_plugin_tools(),
+            Err(_) => Vec::new(),
+        };
+        let builtin_names: &[&str] = tools::BUILTIN_TOOL_NAMES;
+        for meta in metas {
+            if builtin_names.contains(&meta.name.as_str()) {
+                eprintln!(
+                    "warning: plugin tool '{}' collides with a dirge built-in; skipping plugin version",
+                    meta.name,
+                );
+                continue;
+            }
+            if let Some(adapter) =
+                crate::plugin::extension::JanetLoopTool::from_meta(meta, pm_arc.clone())
+            {
+                tools.push(Arc::new(adapter));
+            }
+        }
+    }
+
     tools
 }
 

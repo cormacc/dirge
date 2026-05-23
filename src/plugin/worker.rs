@@ -360,6 +360,33 @@ const HARNESS_INIT: &str = r#"
 (defn harness/switch-session [session-id]
   (when (string? session-id)
     (harness/-push-op "switch-session" session-id)))
+
+# Plugin-registered LLM-callable tools (P9a). Plugins call
+#   (harness/register-tool name description label parameters handler &opt execution-mode)
+# at load time to make a new tool available to the LLM alongside
+# the built-ins. `parameters` is a JSON-schema string. `handler` is
+# the name of a Janet function that takes one argument (the raw JSON
+# args string the LLM produced) and returns either a string (the
+# tool result text) or any value that (string ...) can render.
+# `execution-mode` is :parallel (read-only, default) or :sequential
+# (mutating). Stored as a tab-separated, escape-encoded line per
+# tool so a single Janet -> Rust round-trip surfaces them all.
+(var harness-tools-list "")
+(defn harness/register-tool [name description label parameters handler &opt execution-mode]
+  (when (and (string? name) (string? description) (string? label)
+             (string? parameters) (string? handler))
+    (let [mode (cond
+                 (or (= execution-mode :sequential) (= execution-mode "sequential")) "sequential"
+                 (or (= execution-mode :parallel) (= execution-mode "parallel")) "parallel"
+                 "")]
+      (set harness-tools-list
+           (string harness-tools-list
+                   (harness/-escape name) "\t"
+                   (harness/-escape description) "\t"
+                   (harness/-escape label) "\t"
+                   (harness/-escape parameters) "\t"
+                   (harness/-escape handler) "\t"
+                   mode "\n")))))
 "#;
 
 /// Janet-side aliases that defer the actual blocking work to the

@@ -883,6 +883,101 @@ mod tests {
         assert_eq!(providers[1].3, Some("B_KEY".to_string()));
     }
 
+    // --- P9a: plugin-registered LLM tools -------------------------------
+
+    /// `harness/register-tool` with the minimum positional args records
+    /// the spec with no execution-mode override.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_register_tool_records_spec_default_mode() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(
+            r#"(harness/register-tool "echo" "Echo args back" "Echo"
+                                       "{\"type\":\"object\"}" "echo-handler")"#,
+        )
+        .unwrap();
+        let tools = mgr.list_plugin_tools();
+        assert_eq!(tools.len(), 1);
+        let t = &tools[0];
+        assert_eq!(t.name, "echo");
+        assert_eq!(t.description, "Echo args back");
+        assert_eq!(t.label, "Echo");
+        assert_eq!(t.parameters, "{\"type\":\"object\"}");
+        assert_eq!(t.handler, "echo-handler");
+        assert_eq!(t.execution_mode, None);
+    }
+
+    /// `:sequential` keyword maps to the execution_mode override.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_register_tool_sequential_mode() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(
+            r#"(harness/register-tool "mutate" "Side effects" "Mutate" "{}" "h" :sequential)"#,
+        )
+        .unwrap();
+        let tools = mgr.list_plugin_tools();
+        assert_eq!(tools[0].execution_mode.as_deref(), Some("sequential"));
+    }
+
+    /// Non-string positional args drop the registration silently so a
+    /// typo can't crash the plugin host.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_register_tool_ignores_non_string_args() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/register-tool 1 "d" "l" "{}" "h")"#).unwrap();
+        mgr.eval(r#"(harness/register-tool "n" 2 "l" "{}" "h")"#).unwrap();
+        mgr.eval(r#"(harness/register-tool "n" "d" "l" {} "h")"#).unwrap();
+        assert!(mgr.list_plugin_tools().is_empty());
+    }
+
+    /// Multiple registrations surface in insertion order. Parameters
+    /// with embedded tabs/newlines round-trip correctly through
+    /// `harness/-escape` / `unescape_harness_field`.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_register_multiple_tools_round_trip_escapes() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(harness/register-tool "a" "first" "A" "{}" "ha")"#).unwrap();
+        mgr.eval(
+            r#"(harness/register-tool "b" "with\ttab\nand newline" "B" "{\"x\":1}" "hb")"#,
+        )
+        .unwrap();
+        let tools = mgr.list_plugin_tools();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "a");
+        assert_eq!(tools[1].name, "b");
+        assert_eq!(tools[1].description, "with\ttab\nand newline");
+    }
+
+    /// `invoke_plugin_tool` dispatches to the named Janet handler and
+    /// returns its stringified output. The handler sees the raw JSON
+    /// args string so it can parse/inspect them at its discretion.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_invoke_plugin_tool_dispatches_to_handler() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(defn echo-handler [args] (string "got:" args))"#)
+            .unwrap();
+        let out = mgr
+            .invoke_plugin_tool("echo-handler", r#"{"x":1}"#)
+            .unwrap();
+        assert_eq!(out, r#"got:{"x":1}"#);
+    }
+
+    /// Handler exceptions bubble up as `Err(message)` rather than
+    /// crashing the worker.
+    #[cfg(feature = "plugin")]
+    #[test]
+    fn test_invoke_plugin_tool_propagates_handler_error() {
+        let mut mgr = PluginManager::try_new().unwrap();
+        mgr.eval(r#"(defn boom-handler [args] (error "kaboom"))"#)
+            .unwrap();
+        let err = mgr.invoke_plugin_tool("boom-handler", "{}").unwrap_err();
+        assert!(err.contains("kaboom"), "got: {err}");
+    }
+
     /// Non-string args silently drop instead of crashing the plugin.
     #[cfg(feature = "plugin")]
     #[test]
@@ -1649,6 +1744,8 @@ use std::collections::HashMap;
 use worker::Worker;
 pub use worker::{DialogReply, DialogRequest};
 
+#[cfg(feature = "plugin")]
+pub mod extension;
 pub mod hook;
 pub mod worker;
 
@@ -2328,6 +2425,43 @@ impl PluginManager {
             .collect()
     }
 
+    /// Snapshot plugin-registered LLM tools (P9a). Each entry has the
+    /// raw JSON-schema parameters string, the Janet handler name, and
+    /// an optional execution-mode override. Read once after all plugins
+    /// load; the host wraps each entry in a `JanetLoopTool` adapter and
+    /// appends them to the agent loop's tool registry.
+    pub fn list_plugin_tools(&mut self) -> Vec<PluginToolMeta> {
+        let raw = match self.worker.eval("harness-tools-list") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        raw.lines().filter_map(parse_plugin_tool_line).collect()
+    }
+
+    /// Invoke a Janet tool handler with the raw JSON args string the
+    /// LLM produced. The handler is called as `(handler args)` and may
+    /// return any value `(string ...)` can render. Returns the tool's
+    /// stringified output, or `Err` carrying the Janet exception text
+    /// when the handler raises.
+    pub fn invoke_plugin_tool(&mut self, handler: &str, args_json: &str) -> Result<String, String> {
+        let escaped = escape_janet_string(args_json);
+        let code = format!(
+            r#"(try (let [r ({handler} "{args}")] (if (string? r) r (string r)))
+                   ([err fib] (string "DIRGE_TOOL_ERR:" err)))"#,
+            handler = handler,
+            args = escaped,
+        );
+        let out = self.worker.eval(&code)?;
+        if let Some(msg) = out.strip_prefix("DIRGE_TOOL_ERR:") {
+            Err(msg.to_string())
+        } else {
+            Ok(out)
+        }
+    }
+
     /// Drain pending `(harness/notify ...)` entries as `(level, msg)`
     /// pairs in insertion order. The UI calls this each loop tick and
     /// renders entries as colored chat lines. Returns an empty Vec when
@@ -2502,6 +2636,51 @@ impl PluginManager {
         let _ = self.worker.eval(r#"(set harness-tree-ops "")"#);
         parsed
     }
+}
+
+/// Snapshot of a plugin-registered LLM tool (P9a). Each field maps
+/// 1:1 to the `(harness/register-tool …)` call site. `execution_mode`
+/// is `None` when the plugin omitted the optional argument; the agent
+/// loop then uses its default (parallel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "plugin"), allow(dead_code))]
+pub struct PluginToolMeta {
+    pub name: String,
+    pub description: String,
+    pub label: String,
+    /// Raw JSON-schema string for the tool's `parameters` field.
+    /// Stored unparsed so the host can hand it straight to the agent
+    /// loop's `LoopTool::parameters()` (which is itself `Value`).
+    pub parameters: String,
+    /// Name of the Janet function that handles invocations.
+    pub handler: String,
+    /// `"sequential"` or `"parallel"`, or `None` when unset.
+    pub execution_mode: Option<String>,
+}
+
+fn parse_plugin_tool_line(line: &str) -> Option<PluginToolMeta> {
+    let mut parts = line.split('\t');
+    let name = unescape_harness_field(parts.next()?);
+    let description = unescape_harness_field(parts.next()?);
+    let label = unescape_harness_field(parts.next()?);
+    let parameters = unescape_harness_field(parts.next()?);
+    let handler = unescape_harness_field(parts.next()?);
+    let mode_raw = parts.next().unwrap_or("").trim();
+    if name.is_empty() || handler.is_empty() {
+        return None;
+    }
+    let execution_mode = match mode_raw {
+        "sequential" | "parallel" => Some(mode_raw.to_string()),
+        _ => None,
+    };
+    Some(PluginToolMeta {
+        name,
+        description,
+        label,
+        parameters,
+        handler,
+        execution_mode,
+    })
 }
 
 /// Plugin-issued session-tree mutation. Carries the args as Strings so
