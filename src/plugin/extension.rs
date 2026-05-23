@@ -23,8 +23,8 @@ use std::sync::Mutex;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
-use crate::agent::agent_loop::tool::{AbortSignal, LoopTool, LoopToolUpdate};
 use crate::agent::agent_loop::result::LoopToolResult;
+use crate::agent::agent_loop::tool::{AbortSignal, LoopTool, LoopToolUpdate};
 use crate::agent::agent_loop::types::ToolExecutionMode;
 
 use super::{PluginManager, PluginShortcutMeta, PluginToolMeta};
@@ -446,7 +446,12 @@ mod tests {
         let metas: Vec<PluginToolMeta> = pm.lock().unwrap().list_plugin_tools();
         let tool = JanetLoopTool::from_meta(metas.into_iter().next().unwrap(), pm.clone()).unwrap();
         let err = tool
-            .execute("c", Value::Object(Default::default()), AbortSignal::new(), noop_update())
+            .execute(
+                "c",
+                Value::Object(Default::default()),
+                AbortSignal::new(),
+                noop_update(),
+            )
             .await
             .expect_err("handler error should bubble up as Err");
         assert!(err.contains("intentional"), "got: {err}");

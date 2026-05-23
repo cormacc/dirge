@@ -926,9 +926,12 @@ mod tests {
     #[test]
     fn test_register_tool_ignores_non_string_args() {
         let mut mgr = PluginManager::try_new().unwrap();
-        mgr.eval(r#"(harness/register-tool 1 "d" "l" "{}" "h")"#).unwrap();
-        mgr.eval(r#"(harness/register-tool "n" 2 "l" "{}" "h")"#).unwrap();
-        mgr.eval(r#"(harness/register-tool "n" "d" "l" {} "h")"#).unwrap();
+        mgr.eval(r#"(harness/register-tool 1 "d" "l" "{}" "h")"#)
+            .unwrap();
+        mgr.eval(r#"(harness/register-tool "n" 2 "l" "{}" "h")"#)
+            .unwrap();
+        mgr.eval(r#"(harness/register-tool "n" "d" "l" {} "h")"#)
+            .unwrap();
         assert!(mgr.list_plugin_tools().is_empty());
     }
 
@@ -939,11 +942,10 @@ mod tests {
     #[test]
     fn test_register_multiple_tools_round_trip_escapes() {
         let mut mgr = PluginManager::try_new().unwrap();
-        mgr.eval(r#"(harness/register-tool "a" "first" "A" "{}" "ha")"#).unwrap();
-        mgr.eval(
-            r#"(harness/register-tool "b" "with\ttab\nand newline" "B" "{\"x\":1}" "hb")"#,
-        )
-        .unwrap();
+        mgr.eval(r#"(harness/register-tool "a" "first" "A" "{}" "ha")"#)
+            .unwrap();
+        mgr.eval(r#"(harness/register-tool "b" "with\ttab\nand newline" "B" "{\"x\":1}" "hb")"#)
+            .unwrap();
         let tools = mgr.list_plugin_tools();
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name, "a");
@@ -992,15 +994,21 @@ mod tests {
         let mut mgr = PluginManager::try_new().unwrap();
         let plugins_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins");
 
-        mgr.load_file(&plugins_dir.join("example_tool.janet")).unwrap();
-        mgr.load_file(&plugins_dir.join("example_shortcut.janet")).unwrap();
+        mgr.load_file(&plugins_dir.join("example_tool.janet"))
+            .unwrap();
+        mgr.load_file(&plugins_dir.join("example_shortcut.janet"))
+            .unwrap();
         mgr.load_file(&plugins_dir.join("example_message_renderer.janet"))
             .unwrap();
 
         // 9a — registered tool surfaces in the registry with the
         // documented metadata.
         let tools = mgr.list_plugin_tools();
-        assert_eq!(tools.len(), 1, "example_tool.janet registers exactly one tool");
+        assert_eq!(
+            tools.len(),
+            1,
+            "example_tool.janet registers exactly one tool"
+        );
         assert_eq!(tools[0].name, "plugin_echo");
         assert_eq!(tools[0].label, "Plugin Echo");
         assert_eq!(tools[0].handler, "echo-tool-handler");
@@ -1021,7 +1029,10 @@ mod tests {
 
         // 9d — message renderer registered for "status".
         let renderers = mgr.list_message_renderers();
-        assert_eq!(renderers, vec![("status".to_string(), "render-status".to_string())]);
+        assert_eq!(
+            renderers,
+            vec![("status".to_string(), "render-status".to_string())]
+        );
         let rendered = mgr
             .invoke_message_renderer("render-status", r#"{"type":"status","content":"ok"}"#)
             .unwrap();
@@ -1040,18 +1051,17 @@ mod tests {
         mgr.eval(r#"(harness/register-message-renderer "status" "render-status")"#)
             .unwrap();
         let r = mgr.list_message_renderers();
-        assert_eq!(
-            r,
-            vec![("status".to_string(), "render-status".to_string())]
-        );
+        assert_eq!(r, vec![("status".to_string(), "render-status".to_string())]);
     }
 
     #[cfg(feature = "plugin")]
     #[test]
     fn test_register_message_renderer_multiple_in_load_order() {
         let mut mgr = PluginManager::try_new().unwrap();
-        mgr.eval(r#"(harness/register-message-renderer "a" "ra")"#).unwrap();
-        mgr.eval(r#"(harness/register-message-renderer "b" "rb")"#).unwrap();
+        mgr.eval(r#"(harness/register-message-renderer "a" "ra")"#)
+            .unwrap();
+        mgr.eval(r#"(harness/register-message-renderer "b" "rb")"#)
+            .unwrap();
         let r = mgr.list_message_renderers();
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].0, "a");
@@ -1062,8 +1072,10 @@ mod tests {
     #[test]
     fn test_register_message_renderer_ignores_non_string_args() {
         let mut mgr = PluginManager::try_new().unwrap();
-        mgr.eval(r#"(harness/register-message-renderer 1 "h")"#).unwrap();
-        mgr.eval(r#"(harness/register-message-renderer "t" :sym)"#).unwrap();
+        mgr.eval(r#"(harness/register-message-renderer 1 "h")"#)
+            .unwrap();
+        mgr.eval(r#"(harness/register-message-renderer "t" :sym)"#)
+            .unwrap();
         assert!(mgr.list_message_renderers().is_empty());
     }
 
@@ -1080,10 +1092,7 @@ mod tests {
         let out = mgr
             .invoke_message_renderer("render-status", r#"{"type":"status","content":"ok"}"#)
             .unwrap();
-        assert_eq!(
-            out.unwrap(),
-            r#">>{"type":"status","content":"ok"}"#
-        );
+        assert_eq!(out.unwrap(), r#">>{"type":"status","content":"ok"}"#);
     }
 
     /// Handler errors swallow to `Ok(None)` — pi semantics keep
@@ -1092,7 +1101,8 @@ mod tests {
     #[test]
     fn test_invoke_message_renderer_swallows_handler_error() {
         let mut mgr = PluginManager::try_new().unwrap();
-        mgr.eval(r#"(defn boom [payload] (error "kaboom"))"#).unwrap();
+        mgr.eval(r#"(defn boom [payload] (error "kaboom"))"#)
+            .unwrap();
         let out = mgr.invoke_message_renderer("boom", "{}").unwrap();
         assert_eq!(out, None);
     }
@@ -1116,7 +1126,8 @@ mod tests {
     #[test]
     fn test_register_shortcut_description_optional() {
         let mut mgr = PluginManager::try_new().unwrap();
-        mgr.eval(r#"(harness/register-shortcut "f5" "refresh")"#).unwrap();
+        mgr.eval(r#"(harness/register-shortcut "f5" "refresh")"#)
+            .unwrap();
         let shortcuts = mgr.list_shortcuts();
         assert_eq!(shortcuts.len(), 1);
         assert!(shortcuts[0].description.is_empty());
@@ -1127,7 +1138,8 @@ mod tests {
     fn test_register_shortcut_ignores_non_string_args() {
         let mut mgr = PluginManager::try_new().unwrap();
         mgr.eval(r#"(harness/register-shortcut 42 "h")"#).unwrap();
-        mgr.eval(r#"(harness/register-shortcut "f5" :sym)"#).unwrap();
+        mgr.eval(r#"(harness/register-shortcut "f5" :sym)"#)
+            .unwrap();
         assert!(mgr.list_shortcuts().is_empty());
     }
 

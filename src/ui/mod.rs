@@ -736,7 +736,11 @@ pub async fn run_interactive(
     #[cfg(feature = "plugin")]
     let plugin_shortcuts: Vec<crate::plugin::extension::ParsedShortcut> = {
         let metas = crate::plugin::hook::global()
-            .map(|pm| pm.lock().unwrap_or_else(|e| e.into_inner()).list_shortcuts())
+            .map(|pm| {
+                pm.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .list_shortcuts()
+            })
             .unwrap_or_default();
         crate::plugin::extension::parse_shortcuts(metas)
     };
