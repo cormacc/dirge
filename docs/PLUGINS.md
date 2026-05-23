@@ -375,6 +375,23 @@ built-in ones. Mirrors pi's `api.registerTool({...})`.
 
 See [`plugins/example_tool.janet`](../plugins/example_tool.janet).
 
+**Cancellation semantics.** Plugin tools run synchronously on the
+Janet worker thread, which can't be preempted mid-evaluation. When
+the user hits Ctrl+C/Esc:
+
+- The agent loop sees the abort and returns to the user immediately
+  (the dispatcher races the tool future against the cancel signal).
+- A plugin tool that hasn't started yet is short-circuited before it
+  even acquires the PluginManager lock; its handler does not run.
+- A plugin tool that has already entered the Janet handler runs to
+  completion in the background — its return value is discarded, but
+  the Janet VM holds the PluginManager mutex until the handler
+  returns. Subsequent plugin-tool calls (and any other PM consumer)
+  block on that lock.
+
+Keep handler bodies bounded. There is no `signal.aborted` equivalent
+inside Janet because the worker can't yield mid-call.
+
 ### Keyboard shortcuts
 
 Bind a key combination in interactive mode. Mirrors pi's

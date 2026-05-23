@@ -319,7 +319,7 @@ impl LoopTool for JanetLoopTool {
         &'a self,
         _tool_call_id: &'a str,
         args: Value,
-        _signal: AbortSignal,
+        signal: AbortSignal,
         _on_update: LoopToolUpdate,
     ) -> Pin<Box<dyn Future<Output = Result<LoopToolResult, String>> + Send + 'a>> {
         // Serialize args back to JSON. Janet doesn't have a JSON
@@ -330,10 +330,35 @@ impl LoopTool for JanetLoopTool {
         let pm = self.pm.clone();
         let handler = self.handler.clone();
         Box::pin(async move {
-            let result = tokio::task::spawn_blocking(move || {
+            // Cancellation pre-flight. The dispatcher (tools.rs)
+            // races this whole future against `wait_for_cancel` so
+            // a late cancel still unblocks the agent loop — but
+            // Janet handlers run synchronously on the worker
+            // thread, holding the PluginManager mutex. Once the
+            // handler starts, we can't interrupt it; subsequent
+            // plugin-tool calls (or any PM mutex consumer) would
+            // queue behind a doomed handler. Bail before
+            // acquiring the mutex if the signal already fired.
+            if signal.is_cancelled() {
+                return Err("plugin tool aborted before execution".to_string());
+            }
+            let signal_in = signal.clone();
+            let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                // Re-check on the worker thread: the user may
+                // have hit Esc while we waited for the runtime to
+                // schedule the blocking task.
+                if signal_in.is_cancelled() {
+                    return Err("plugin tool aborted before mutex acquire".to_string());
+                }
                 let mut guard = pm
                     .lock()
                     .map_err(|_| "plugin manager mutex poisoned".to_string())?;
+                // Final check after the mutex unblocks us — a
+                // prior plugin tool may have held the lock for a
+                // while; user could have cancelled in that window.
+                if signal_in.is_cancelled() {
+                    return Err("plugin tool aborted while waiting for plugin manager".to_string());
+                }
                 guard.invoke_plugin_tool(&handler, &args_json)
             })
             .await
@@ -578,6 +603,88 @@ mod tests {
     }
 
     // --- back to JanetLoopTool tests --------------------------------
+
+    /// H1: a signal that's already cancelled when execute() is
+    /// called short-circuits BEFORE acquiring the PluginManager
+    /// mutex. The dispatcher already races the whole execute future
+    /// against wait_for_cancel, but the JS handler still ran and
+    /// held the mutex against subsequent callers. The pre-flight
+    /// check prevents that wasted work and keeps the mutex
+    /// available for the loop's next move.
+    #[tokio::test]
+    async fn janet_loop_tool_execute_short_circuits_on_pre_cancelled_signal() {
+        let pm = {
+            let mut mgr = PluginManager::try_new().unwrap();
+            // Sentinel: the handler sets a global var so we can
+            // confirm it never ran when cancelled.
+            mgr.eval(
+                r#"(var --h1-ran nil)
+                   (defn slow [args]
+                     (set --h1-ran true)
+                     "ok")
+                   (harness/register-tool "slow" "test" "Slow" "{}" "slow")"#,
+            )
+            .unwrap();
+            Arc::new(Mutex::new(mgr))
+        };
+        let metas: Vec<PluginToolMeta> = pm.lock().unwrap().list_plugin_tools();
+        let tool = JanetLoopTool::from_meta(metas.into_iter().next().unwrap(), pm.clone()).unwrap();
+
+        let signal = AbortSignal::new();
+        signal.cancel();
+        let err = tool
+            .execute(
+                "c",
+                Value::Object(Default::default()),
+                signal,
+                noop_update(),
+            )
+            .await
+            .expect_err("pre-cancelled signal must short-circuit to Err");
+        assert!(
+            err.contains("aborted"),
+            "error should mention abort; got: {err}"
+        );
+
+        // Confirm the Janet handler did NOT run.
+        let ran = pm.lock().unwrap().eval("--h1-ran").unwrap();
+        assert_eq!(ran, "nil", "handler must not execute when pre-cancelled");
+    }
+
+    /// Non-cancelled signal lets execute() run normally. Regression
+    /// guard: the new pre-flight check shouldn't break the happy path.
+    #[tokio::test]
+    async fn janet_loop_tool_execute_happy_path_with_live_signal() {
+        let pm = {
+            let mut mgr = PluginManager::try_new().unwrap();
+            mgr.eval(
+                r#"(defn ok-handler [args] "ran")
+                   (harness/register-tool "ok" "test" "OK" "{}" "ok-handler")"#,
+            )
+            .unwrap();
+            Arc::new(Mutex::new(mgr))
+        };
+        let metas: Vec<PluginToolMeta> = pm.lock().unwrap().list_plugin_tools();
+        let tool = JanetLoopTool::from_meta(metas.into_iter().next().unwrap(), pm.clone()).unwrap();
+
+        let signal = AbortSignal::new(); // not cancelled
+        let result = tool
+            .execute(
+                "c",
+                Value::Object(Default::default()),
+                signal,
+                noop_update(),
+            )
+            .await
+            .expect("happy path");
+        let text = result
+            .content
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text, "ran");
+    }
 
     /// Handler errors propagate as `Err(_)`, NOT as an Ok result with
     /// the error text inlined. The loop's error path is what surfaces
