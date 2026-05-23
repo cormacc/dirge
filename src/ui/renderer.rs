@@ -36,13 +36,9 @@ pub const ALERT_FRAME_ROWS: u16 = 2;
 /// chat row when there's room (content_indent >= 1).
 pub const CHAT_FRAME_ROWS: u16 = 2;
 
-/// Width of the optional right-hand info panel content area, in columns.
-/// Plus one column for the vertical divider gives `PANEL_RESERVE`.
-const PANEL_WIDTH: u16 = 32;
-/// Total columns the panel costs the chat area when visible (panel + divider).
-const PANEL_RESERVE: u16 = PANEL_WIDTH + 1;
-/// Minimum terminal width at which `PanelMode::Auto` decides to show the
-/// panel. Below this the chat content would be too cramped.
+/// Minimum terminal width at which `PanelMode::Auto` decides to show
+/// the side panels. Below this the chat is too narrow to spare any
+/// margin for the AGENT STATUS / SYSTEM gutters.
 const PANEL_AUTO_MIN_COLS: u16 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,21 +417,21 @@ impl Renderer {
         let (cols, _) = self.terminal_size();
         match self.panel_mode {
             PanelMode::Off => false,
-            PanelMode::On => cols >= PANEL_RESERVE + 20,
-            PanelMode::Auto => cols >= PANEL_AUTO_MIN_COLS,
+            // Show side panels only when there's enough margin to
+            // host them — content_indent reflects each side's width
+            // in the centered layout, so require ~15 cols min.
+            PanelMode::On => self.content_indent() >= 15,
+            PanelMode::Auto => cols >= PANEL_AUTO_MIN_COLS && self.content_indent() >= 15,
         }
     }
 
-    /// Content-area width in columns: terminal width minus the panel and
-    /// divider when the panel is visible. All chat/input width math uses
-    /// this so wrapping/clipping respects the panel.
+    /// Content-area width in columns. With the centered chat layout,
+    /// the chat fills the middle and the side panels split the
+    /// remainder symmetrically — so chat width math uses the full
+    /// terminal width (minus 2 for the chat ║ borders).
     fn content_cols(&self) -> u16 {
         let (cols, _) = self.terminal_size();
-        if self.panel_visible() {
-            cols.saturating_sub(PANEL_RESERVE)
-        } else {
-            cols
-        }
+        cols
     }
 
     pub fn set_monochrome(&mut self, monochrome: bool) {
@@ -460,14 +456,14 @@ impl Renderer {
         self.content_width()
     }
 
-    /// Raw width of the chat band (terminal minus panel reserve,
-    /// minus 1 col for the rightmost gutter). Used for *positioning*
-    /// math (`content_indent`, panel divider layout) where the actual
-    /// available column count matters; chat text wrapping should go
-    /// through `max_line_width` / `content_width` instead so it
+    /// Raw width of the chat band (terminal width minus 2 cols for
+    /// the chat frame's left + right ║). Used for *positioning*
+    /// math (`content_indent`, panel widths) — chat text wrapping
+    /// should go through `max_line_width` / `content_width` so it
     /// honors the 120-col cap.
     pub fn line_width(&self) -> usize {
-        self.content_cols().saturating_sub(1) as usize
+        let (cols, _) = self.terminal_size();
+        cols.saturating_sub(2) as usize
     }
 
     /// Target width for chat content. Caps at 120 cols so wide
@@ -973,18 +969,25 @@ impl Renderer {
                 write!(stdout, "{}", ResetColor)?;
             }
 
-            // ── bottom frame row (chat closes, side panels continue) ──
+            // ── bottom frame row (chat ONLY — side panels open) ──
+            // Side panels have no bottom bar so the input/avatar
+            // boxes below them sit flush against empty space rather
+            // than colliding with `═══` artifacts.
             let bot_row = chat_y0 + visible as u16;
-            let mut bot = String::new();
-            bot.push_str(&"═".repeat(left_w));
-            bot.push('╚');
-            bot.push_str(&"═".repeat(chat_inner_w));
-            bot.push('╝');
-            bot.push_str(&"═".repeat(right_w));
-            stdout.execute(MoveTo(0, bot_row))?;
+            // Wipe side regions so any stale border pixels from a
+            // taller previous redraw are cleared.
+            if left_w > 0 {
+                stdout.execute(MoveTo(0, bot_row))?;
+                write!(stdout, "{}", " ".repeat(left_w))?;
+            }
+            stdout.execute(MoveTo(frame_left, bot_row))?;
             write!(stdout, "{}", SetForegroundColor(header_color))?;
-            write!(stdout, "{}", bot)?;
+            write!(stdout, "╚{}╝", "═".repeat(chat_inner_w))?;
             write!(stdout, "{}", ResetColor)?;
+            if right_w > 0 && frame_right + 1 < cols {
+                stdout.execute(MoveTo(frame_right + 1, bot_row))?;
+                write!(stdout, "{}", " ".repeat(right_w))?;
+            }
         }
 
         if self.scroll_offset > 0 {
@@ -1036,10 +1039,12 @@ impl Renderer {
         if indent < 16 {
             return Ok(());
         }
-        // Leave the bottom 3 rows for the avatar.
-        let avatar_reserve: u16 = 3;
-        let panel_bottom =
-            rows.saturating_sub(self.input_rows + 1 + ALERT_FRAME_ROWS + avatar_reserve);
+        // Left panel content fills from row 1 down to the row above
+        // the avatar's box top frame (= input_top - 2). Painting
+        // through this range means any stale rows above a shrinking
+        // avatar box still get wiped on redraw.
+        let input_top_row = rows.saturating_sub(self.input_rows + ALERT_FRAME_ROWS);
+        let panel_bottom = input_top_row.saturating_sub(1);
         if panel_bottom == 0 {
             return Ok(());
         }
@@ -1607,13 +1612,20 @@ impl Renderer {
         if let Some(overlay) = &self.alert_overlay {
             for row_offset in 0..visible_input_rows {
                 let row = input_top + row_offset as u16;
-                // Wipe only the input frame band.
+                // Wipe the input frame band.
                 stdout.execute(MoveTo(inp_left, row))?;
                 write!(
                     stdout,
                     "{}",
                     " ".repeat((inp_right - inp_left + 1) as usize)
                 )?;
+                // Wipe the right margin so right-panel content from
+                // earlier redraws doesn't ghost into the bottom
+                // strip when the input area expands.
+                if inp_right + 1 < cols {
+                    stdout.execute(MoveTo(inp_right + 1, row))?;
+                    write!(stdout, "{}", " ".repeat((cols - inp_right - 1) as usize))?;
+                }
                 // Side borders aligned with the chat frame's ║ cols.
                 stdout.execute(MoveTo(inp_left, row))?;
                 write!(stdout, "{}", SetForegroundColor(dim_color))?;
@@ -1675,14 +1687,21 @@ impl Renderer {
         for row_offset in 0..visible_input_rows {
             let row = input_top + row_offset as u16;
             let vr_idx = first_visible_visual + row_offset;
-            // Wipe only the input frame band so the avatar's box on
-            // the left isn't stomped each redraw.
+            // Wipe the input frame band so the avatar's box on the
+            // left isn't stomped each redraw.
             stdout.execute(MoveTo(inp_left, row))?;
             write!(
                 stdout,
                 "{}",
                 " ".repeat((inp_right - inp_left + 1) as usize)
             )?;
+            // Wipe the right margin so right-panel content from
+            // earlier redraws doesn't ghost into the bottom strip
+            // when the input area expands.
+            if inp_right + 1 < cols {
+                stdout.execute(MoveTo(inp_right + 1, row))?;
+                write!(stdout, "{}", " ".repeat((cols - inp_right - 1) as usize))?;
+            }
             // ui-redesign: │ side borders aligned with the chat
             // frame's ║ columns so the whole UI shares one vertical.
             stdout.execute(MoveTo(inp_left, row))?;
@@ -1892,10 +1911,14 @@ impl Renderer {
             return Ok(());
         }
         let inner_w = (cols - panel_x) as usize;
-        let last_row = rows.saturating_sub(1); // status row
-        // Bottom chat frame sits at row chat_y0 + visible_lines();
-        // side panel content ends just above it.
-        let bottom_frame_row = (1 + self.visible_lines()) as u16;
+        // Right-panel content fills from row 1 down to the row above
+        // the bottom strip's top frame. Painting all the way down
+        // (rather than stopping at chat's old bottom frame row)
+        // means that when the input area expands or shrinks, any
+        // stale content above the new boundary still gets wiped on
+        // the next redraw.
+        let input_top_row = rows.saturating_sub(self.input_rows + ALERT_FRAME_ROWS);
+        let panel_bottom = input_top_row.saturating_sub(1);
 
         let lines = self.build_panel_lines(inner_w, rows);
 
@@ -1903,7 +1926,7 @@ impl Renderer {
         let dim = self.color(crate::ui::theme::dim());
         let body = self.color(crate::ui::theme::agent());
 
-        for row in 1..bottom_frame_row.min(last_row) {
+        for row in 1..panel_bottom {
             let idx = (row - 1) as usize;
             stdout.execute(MoveTo(panel_x, row))?;
             if let Some((text, color)) = lines.get(idx) {
@@ -1984,20 +2007,17 @@ impl Renderer {
         // Inner width inside the frame's left+right borders.
         let inner = width.saturating_sub(2);
         // Helper: format a content row inside a closed pill — left
-        // border, padded content, right border. Truncates content
-        // that overflows so the pill stays a perfect rectangle.
+        // border, LEFT-ALIGNED content, right-padded to fill the
+        // band, right border. Truncates content that overflows so
+        // the pill stays a perfect rectangle.
         let row = |text: &str| -> String {
-            let trimmed = truncate(text, inner);
-            // Pad by display width too, otherwise an emoji-bearing
-            // row left a 1-cell gap before the right border.
+            // Reserve 1 cell of leading padding so content doesn't
+            // sit flush against the │ border.
+            let cap = inner.saturating_sub(1);
+            let trimmed = truncate(text, cap);
             let len = UnicodeWidthStr::width(trimmed.as_str());
-            let fill = inner.saturating_sub(len);
-            // ui-redesign: center content horizontally. Light single-
-            // line borders for sub-panel rows (heavy double-line is
-            // only on the OUTER pane frame, painted elsewhere).
-            let l = fill / 2;
-            let r = fill - l;
-            format!("│{}{}{}│", " ".repeat(l), trimmed, " ".repeat(r))
+            let fill = inner.saturating_sub(len + 1);
+            format!("│ {}{}│", trimmed, " ".repeat(fill))
         };
         // ui-redesign: light rounded bottom for sub-panels.
         let bottom = || -> String { format!("╰{}╯", "─".repeat(inner)) };
