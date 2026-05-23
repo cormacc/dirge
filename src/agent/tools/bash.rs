@@ -738,8 +738,7 @@ mod tests {
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
         let perm = std::sync::Arc::new(std::sync::Mutex::new(checker));
 
-        let result =
-            check_bash_segments(&Some(perm), &None, "git diff && rm -rf /").await;
+        let result = check_bash_segments(&Some(perm), &None, "git diff && rm -rf /").await;
         assert!(
             result.is_err(),
             "compound: rm segment must hit deny rule even after safe git segment; got {result:?}",
@@ -777,8 +776,7 @@ mod tests {
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
         let perm = std::sync::Arc::new(std::sync::Mutex::new(checker));
 
-        let result =
-            check_bash_segments(&Some(perm), &None, "echo hi > /etc/passwd").await;
+        let result = check_bash_segments(&Some(perm), &None, "echo hi > /etc/passwd").await;
         assert!(
             result.is_err(),
             "redirect to /etc/passwd should be denied by write rules; got {result:?}",
@@ -865,8 +863,7 @@ mod tests {
         // `777` is the mode spec; it must NOT be treated as a
         // path arg (would resolve to /cwd/777, false-positive).
         // `/etc/passwd` IS a path → should hit write deny.
-        let result =
-            check_bash_segments(&Some(perm), &None, "chmod 777 /etc/passwd").await;
+        let result = check_bash_segments(&Some(perm), &None, "chmod 777 /etc/passwd").await;
         assert!(
             result.is_err(),
             "chmod 777 /etc/passwd: mode skipped, path arg gated; got {result:?}",
@@ -930,8 +927,7 @@ mod tests {
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
         let perm = std::sync::Arc::new(std::sync::Mutex::new(checker));
 
-        let result =
-            check_bash_segments(&Some(perm), &None, "echo hi > target/test-out.txt").await;
+        let result = check_bash_segments(&Some(perm), &None, "echo hi > target/test-out.txt").await;
         assert!(
             result.is_ok(),
             "redirect to an explicitly-allowed target should pass; got {result:?}",

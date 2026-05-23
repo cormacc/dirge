@@ -191,8 +191,7 @@ impl PermissionChecker {
         // Track which tools the user explicitly configured (legacy
         // OR via `tools` map) so the bash / MCP default-installers
         // below can decide whether to skip themselves.
-        let mut user_configured: std::collections::HashSet<&str> =
-            std::collections::HashSet::new();
+        let mut user_configured: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
         for (tool_name, tool_perm) in [
             ("bash", &config.bash),
@@ -243,10 +242,7 @@ impl PermissionChecker {
                 // restrict to the known tool name set; unknown tool
                 // names (plugin/MCP) don't gate the bash/MCP
                 // defaults below anyway.
-                if matches!(
-                    tool_name.as_str(),
-                    "bash" | "mcp_tool"
-                ) {
+                if matches!(tool_name.as_str(), "bash" | "mcp_tool") {
                     user_configured.insert(match tool_name.as_str() {
                         "bash" => "bash",
                         "mcp_tool" => "mcp_tool",
@@ -1070,10 +1066,7 @@ mod tests {
         let mut tools_map = HashMap::new();
         let mut plugin_rules = HashMap::new();
         plugin_rules.insert("dangerous".to_string(), Action::Deny);
-        tools_map.insert(
-            "plugin_xyz".to_string(),
-            ToolPerm::Granular(plugin_rules),
-        );
+        tools_map.insert("plugin_xyz".to_string(), ToolPerm::Granular(plugin_rules));
 
         // Tool with a legacy field — map version should win.
         tools_map.insert("websearch".to_string(), ToolPerm::Simple(Action::Deny));

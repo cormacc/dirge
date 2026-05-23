@@ -472,8 +472,7 @@ mod tests {
             write: Some(ToolPerm::Granular(write_rules)),
             ..Default::default()
         };
-        let checker =
-            PermissionChecker::new(&config, SecurityMode::Standard, None);
+        let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
         let perm: PermCheck = Arc::new(Mutex::new(checker));
 
         // `/etc/passwd`: write allows (`**`), edit denies (`/etc/**`).
@@ -491,13 +490,7 @@ mod tests {
         // doesn't match → edit lookup = Ask (default), write = Allow.
         // Combined: Ask (more restrictive). No ask_tx → "non-interactive
         // mode" deny.
-        let result = enforce(
-            &Some(perm),
-            &None,
-            "write",
-            Scope::PathResolve("/tmp/x.rs"),
-        )
-        .await;
+        let result = enforce(&Some(perm), &None, "write", Scope::PathResolve("/tmp/x.rs")).await;
         assert!(
             matches!(result, Err(_)),
             "/tmp/x.rs: write Allow + edit Ask → combined Ask → non-interactive deny; got {result:?}",
@@ -514,8 +507,7 @@ mod tests {
             edit: Some(ToolPerm::Granular(edit_rules)),
             ..Default::default()
         };
-        let checker =
-            PermissionChecker::new(&config, SecurityMode::Standard, None);
+        let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
         let perm: PermCheck = Arc::new(Mutex::new(checker));
 
         // read has builtin-allow `**: allow` → succeeds

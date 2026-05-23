@@ -282,7 +282,12 @@ pub fn extract_mutation_paths(command: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut paths = Vec::new();
-    collect_mutation_paths(tree.root_node(), command.as_bytes(), FILE_MUTATORS, &mut paths);
+    collect_mutation_paths(
+        tree.root_node(),
+        command.as_bytes(),
+        FILE_MUTATORS,
+        &mut paths,
+    );
     paths
 }
 
