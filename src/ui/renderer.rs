@@ -75,6 +75,17 @@ pub struct SubagentStatusRow {
     pub prompt_short: String,
 }
 
+/// ui-redesign: idle-state info for the left panel. When no
+/// subagents are active, the left gutter paints this card: ASCII
+/// DIRGE logo + agent metadata. Updated at session-start (and on
+/// `/model` switch / `/prompt` switch) by the UI loop.
+#[derive(Debug, Clone, Default)]
+pub struct LeftPanelInfo {
+    pub agent_id: String,
+    pub model: String,
+    pub focus: String,
+}
+
 /// Per-chat state saved while a chat is INACTIVE. Mirrors the fields
 /// the active chat uses on the `Renderer` itself; switching chats
 /// swaps state in/out via `save_active` / `load_active`. Keeps the
@@ -136,6 +147,9 @@ pub struct Renderer {
     /// chat windows. Set by the UI loop on each lifecycle event;
     /// rendered above the bottom-row avatar in `draw_left_panel`.
     subagent_status: Vec<SubagentStatusRow>,
+    /// ui-redesign: idle-state info for the left panel. Painted when
+    /// `subagent_status` is empty so the gutter never looks dead.
+    left_panel_info: LeftPanelInfo,
     /// What the agent is doing — drives the bottom-left ASCII avatar.
     avatar_state: crate::ui::avatar::AvatarState,
     /// Animation flip; toggled by `tick_avatar()` so the avatar's
@@ -166,6 +180,7 @@ impl Renderer {
             panel_mode: PanelMode::Auto,
             panel_data: PanelData::default(),
             subagent_status: Vec::new(),
+            left_panel_info: LeftPanelInfo::default(),
             avatar_state: crate::ui::avatar::AvatarState::Idle,
             avatar_tick: false,
         })
@@ -315,6 +330,14 @@ impl Renderer {
     /// repaints the gutter.
     pub fn set_subagent_status(&mut self, rows: Vec<SubagentStatusRow>) {
         self.subagent_status = rows;
+    }
+
+    /// ui-redesign: set the idle-state info shown in the left panel
+    /// (DIRGE logo + agent metadata). The UI loop calls this at
+    /// session start + on `/model` / `/prompt` switches so the
+    /// gutter stays current.
+    pub fn set_left_panel_info(&mut self, info: LeftPanelInfo) {
+        self.left_panel_info = info;
     }
 
     pub fn set_panel_data(&mut self, data: PanelData) {
@@ -855,12 +878,8 @@ impl Renderer {
     /// signals state (running=⋯, completed=✓, failed=✗). Each
     /// field is truncated to fit the gutter width.
     fn draw_left_panel(&self, stdout: &mut io::Stdout, rows: u16) -> io::Result<()> {
-        if self.subagent_status.is_empty() {
-            return Ok(());
-        }
         let indent = self.content_indent();
-        // Need ≥16 cols of gutter for the panel to read meaningfully
-        // (glyph + space + 6-char id + space + 6+-char prompt).
+        // Need ≥16 cols of gutter for the panel to read meaningfully.
         if indent < 16 {
             return Ok(());
         }
@@ -869,6 +888,12 @@ impl Renderer {
         let panel_bottom = rows.saturating_sub(self.input_rows + 1 + avatar_reserve);
         if panel_bottom == 0 {
             return Ok(());
+        }
+        // ui-redesign: idle state — no subagents running. Paint the
+        // DIRGE logo + agent metadata card instead of leaving the
+        // gutter blank.
+        if self.subagent_status.is_empty() {
+            return self.draw_left_panel_idle(stdout, indent, panel_bottom);
         }
         let dim = self.color(crate::ui::theme::dim());
         let header_color = self.color(crate::ui::theme::header());
@@ -914,6 +939,131 @@ impl Renderer {
             let prompt_max = indent.saturating_sub(2 + 7 + 1);
             let prompt_field: String = row.prompt_short.chars().take(prompt_max).collect();
             write!(stdout, "{}", prompt_field)?;
+            write!(stdout, "{}", ResetColor)?;
+        }
+        Ok(())
+    }
+
+    /// ui-redesign: paint the IDLE state of the left panel — the
+    /// DIRGE logo card with agent metadata underneath. Fires when
+    /// no subagents are active. Matches the mockup's bordered card
+    /// shape with `[AGENT STATUS]` header.
+    fn draw_left_panel_idle(
+        &self,
+        stdout: &mut io::Stdout,
+        indent: usize,
+        panel_bottom: u16,
+    ) -> io::Result<()> {
+        let info = &self.left_panel_info;
+        let inner = indent.saturating_sub(2);
+        if inner < 12 {
+            return Ok(());
+        }
+        let header_color = self.color(crate::ui::theme::header());
+        let agent = self.color(crate::ui::theme::agent());
+        let dim = self.color(crate::ui::theme::dim());
+
+        // Card top border with [AGENT STATUS] title in the middle.
+        let title = " [AGENT STATUS] ";
+        let total_dashes = inner.saturating_sub(title.chars().count());
+        let left_dashes = total_dashes / 2;
+        let right_dashes = total_dashes - left_dashes;
+        let top = format!(
+            "╭{}{}{}╮",
+            "─".repeat(left_dashes),
+            title,
+            "─".repeat(right_dashes),
+        );
+        let bottom = format!("╰{}╯", "─".repeat(inner));
+        let wipe = " ".repeat(indent.saturating_sub(1));
+
+        let row = |text: &str| -> String {
+            use unicode_width::UnicodeWidthStr;
+            let dw = UnicodeWidthStr::width(text);
+            let pad = inner.saturating_sub(dw);
+            format!("│{}{}│", text, " ".repeat(pad))
+        };
+
+        // Wipe the gutter then paint top.
+        let mut y: u16 = 0;
+        stdout.execute(MoveTo(0, y))?;
+        write!(stdout, "{}", wipe)?;
+        stdout.execute(MoveTo(0, y))?;
+        write!(stdout, "{}", SetForegroundColor(header_color))?;
+        write!(stdout, "{}", top)?;
+        write!(stdout, "{}", ResetColor)?;
+        y += 1;
+
+        // DIRGE logo: 5 spaced-letter rows + face + agent id.
+        let logo_lines = [
+            (" D I R G E ", agent),
+            ("           ", dim),
+            ("  ( •_•_• ) ", dim),
+            (&format!("    {:>3}    ", info.agent_id.chars().take(3).collect::<String>())[..], dim),
+            ("           ", dim),
+        ];
+        for (text, color) in &logo_lines {
+            if y >= panel_bottom {
+                break;
+            }
+            // Center text inside inner.
+            use unicode_width::UnicodeWidthStr;
+            let dw = UnicodeWidthStr::width(*text);
+            let leading = inner.saturating_sub(dw) / 2;
+            let trailing = inner.saturating_sub(dw).saturating_sub(leading);
+            let line = format!(
+                "│{}{}{}│",
+                " ".repeat(leading),
+                text,
+                " ".repeat(trailing),
+            );
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", wipe)?;
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", SetForegroundColor(*color))?;
+            write!(stdout, "{}", line)?;
+            write!(stdout, "{}", ResetColor)?;
+            y += 1;
+        }
+
+        // Metadata rows.
+        let meta = [
+            format!(" Agent ID: {}", info.agent_id),
+            format!(" Model:    {}", info.model),
+            format!(" Focus:    {}", info.focus),
+        ];
+        for line in &meta {
+            if y >= panel_bottom {
+                break;
+            }
+            let trimmed: String = line.chars().take(inner).collect();
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", wipe)?;
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", SetForegroundColor(dim))?;
+            write!(stdout, "{}", row(&trimmed))?;
+            write!(stdout, "{}", ResetColor)?;
+            y += 1;
+        }
+
+        // Fill remaining rows with empty card borders to keep the
+        // card visually closed even on tall terminals.
+        while y + 1 < panel_bottom {
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", wipe)?;
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", SetForegroundColor(dim))?;
+            write!(stdout, "{}", row(""))?;
+            write!(stdout, "{}", ResetColor)?;
+            y += 1;
+        }
+        // Bottom border.
+        if y < panel_bottom {
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", wipe)?;
+            stdout.execute(MoveTo(0, y))?;
+            write!(stdout, "{}", SetForegroundColor(header_color))?;
+            write!(stdout, "{}", bottom)?;
             write!(stdout, "{}", ResetColor)?;
         }
         Ok(())

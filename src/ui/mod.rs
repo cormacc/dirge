@@ -979,6 +979,27 @@ pub async fn run_interactive(
         lsp_manager.as_ref(),
     ));
 
+    // ui-redesign: seed the left-panel [AGENT STATUS] card with the
+    // current session's metadata so the idle state has a real
+    // logo + agent ID / model / focus on first paint. The card
+    // shows when no subagents are running; refreshed whenever the
+    // user switches model via /model.
+    let initial_left_info = crate::ui::renderer::LeftPanelInfo {
+        agent_id: session
+            .id
+            .as_str()
+            .chars()
+            .take(8)
+            .collect(),
+        model: session.model.to_string(),
+        focus: context
+            .current_prompt_name
+            .as_deref()
+            .unwrap_or("default")
+            .to_string(),
+    };
+    renderer.set_left_panel_info(initial_left_info);
+
     render_session(&mut renderer, session, cli, cfg, context)?;
     renderer.draw_bottom(
         &input,
