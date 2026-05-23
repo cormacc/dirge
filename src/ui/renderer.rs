@@ -738,7 +738,18 @@ impl Renderer {
                         write!(stdout, "{}", SetAttribute(Attribute::Bold))?;
                     }
                     write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                    writeln!(stdout, "{}", chunk)?;
+                    // dirge-ypg: emit CRLF, not bare LF. In raw mode
+                    // (enable_raw_mode disables OPOST/ONLCR) a bare
+                    // `\n` is just LF — cursor moves down one row but
+                    // the column stays where the chunk ended. Even
+                    // though the NEXT write_line call MoveTo(0, r)s
+                    // first, some terminals (or buffer-flush
+                    // interleavings) drop characters in the gap and
+                    // the user sees a staircase on subsequent
+                    // streamed text. Explicit `\r\n` resets the col
+                    // immediately so the cursor is in a known state
+                    // regardless of what follows.
+                    write!(stdout, "{}\r\n", chunk)?;
                     if bloom {
                         write!(stdout, "{}", SetAttribute(Attribute::NormalIntensity))?;
                     }
@@ -806,7 +817,16 @@ impl Renderer {
                         }
                         write!(stdout, "{}", ResetColor)?;
                     }
-                    writeln!(stdout)?;
+                    // dirge-ypg: emit CRLF, not bare LF — same
+                    // reasoning as the write_line site above. User
+                    // hit the staircase on the reasoning stream
+                    // path (`AgentEvent::Reasoning` routes through
+                    // this function); each chunk's trailing LF in
+                    // raw mode moved the cursor down without
+                    // resetting the column, and subsequent chunks
+                    // landed at the prior end-col. Explicit `\r\n`
+                    // resets col immediately.
+                    write!(stdout, "\r\n")?;
                     self.lines = self.lines.saturating_add(1);
                     self.col = 0;
                 }
