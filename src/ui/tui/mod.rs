@@ -21,3 +21,5 @@
 pub mod layout;
 #[allow(dead_code)]
 pub mod frame;
+#[allow(dead_code)]
+pub mod chat;
