@@ -161,13 +161,20 @@ pub struct Renderer {
     /// `subagent_status` is empty so the gutter never looks dead.
     left_panel_info: LeftPanelInfo,
     /// ui-redesign Phase 6: when set, `draw_bottom` paints these
-    /// lines inside the [ALERT] frame INSTEAD of the input editor.
+    /// lines inside the bottom frame INSTEAD of the input editor.
     /// Used by permission prompts and questionnaire prompts so the
     /// user can see the prompt without the input box obscuring it.
     /// Cleared after the ask handler resolves. Each entry is
     /// (text, color); painter centers text horizontally within the
     /// frame's inner band.
     alert_overlay: Option<Vec<(String, Color)>>,
+    /// ui-redesign: title shown in the bottom-frame's top border
+    /// when the alert overlay is active. Empty when no overlay (the
+    /// idle input has no title, per the mockup). Caller of
+    /// `set_alert_overlay` is expected to push this via
+    /// `set_alert_title` so the frame label matches the prompt
+    /// type (`[ALERT]`, `[QUESTION]`, etc.).
+    alert_title: String,
     /// What the agent is doing — drives the bottom-left ASCII avatar.
     avatar_state: crate::ui::avatar::AvatarState,
     /// Animation flip; toggled by `tick_avatar()` so the avatar's
@@ -200,6 +207,7 @@ impl Renderer {
             subagent_status: Vec::new(),
             left_panel_info: LeftPanelInfo::default(),
             alert_overlay: None,
+            alert_title: String::new(),
             avatar_state: crate::ui::avatar::AvatarState::Idle,
             avatar_tick: false,
         })
@@ -370,10 +378,27 @@ impl Renderer {
     /// within `MAX_INPUT_VISIBLE_LINES` — taller overlays clip.
     pub fn set_alert_overlay(&mut self, rows: Vec<(String, Color)>) {
         self.alert_overlay = Some(rows);
+        if self.alert_title.is_empty() {
+            self.alert_title = "[ALERT]".to_string();
+        }
+    }
+
+    /// Set both overlay content and the title shown in the frame's
+    /// top border. Use this instead of `set_alert_overlay` when the
+    /// prompt is something other than a generic alert (e.g.
+    /// `[QUESTION]`).
+    pub fn set_alert_overlay_with_title(
+        &mut self,
+        title: impl Into<String>,
+        rows: Vec<(String, Color)>,
+    ) {
+        self.alert_title = title.into();
+        self.alert_overlay = Some(rows);
     }
 
     pub fn clear_alert_overlay(&mut self) {
         self.alert_overlay = None;
+        self.alert_title.clear();
     }
 
     pub fn alert_overlay_active(&self) -> bool {
@@ -1044,18 +1069,13 @@ impl Renderer {
         write!(stdout, "{}", ResetColor)?;
         y += 1;
 
-        // DIRGE logo: 5 spaced-letter rows + face + agent id.
-        let logo_lines = [
-            (" D I R G E ", agent),
+        // ui-redesign: dropped the face row + 3-char agent-id glyph
+        // per user feedback ("get rid of this in the top left
+        // pane"). Just the spaced D I R G E logo with vertical
+        // breathing room above + below.
+        let logo_lines: [(&str, Color); 3] = [
             ("           ", dim),
-            ("  ( •_•_• ) ", dim),
-            (
-                &format!(
-                    "    {:>3}    ",
-                    info.agent_id.chars().take(3).collect::<String>()
-                )[..],
-                dim,
-            ),
+            (" D I R G E ", agent),
             ("           ", dim),
         ];
         for (text, color) in &logo_lines {
@@ -1454,45 +1474,46 @@ impl Renderer {
         let status_row = rows.saturating_sub(1);
         let input_top = rows.saturating_sub(self.input_rows + ALERT_FRAME_ROWS);
 
-        // ui-redesign: paint the double-line [ALERT] frame around
+        // ui-redesign: paint the light rounded bottom frame around
         // the input area. Top border (row `input_top - 1`) carries
-        // the centered title; bottom border (row `status_row - 1` =
-        // `input_top + input_rows`) closes the frame. Side borders
-        // (║) on every input row are painted further down inside
+        // the centered title (only when an overlay is active —
+        // idle input shows no title per the mockup). Bottom border
+        // (row `status_row - 1`) closes the frame. Side borders
+        // (│) on every input row are painted further down inside
         // the per-row paint loop.
         let cols_usize = cols as usize;
         let dim_color = self.color(crate::ui::theme::dim());
         if ALERT_FRAME_ROWS >= 1 && input_top > 0 {
             let top_row = input_top - 1;
-            let title = "[ALERT]";
-            let title_w = title.chars().count();
-            // Reserve 2 cells for the corners.
-            let fill = cols_usize.saturating_sub(2).saturating_sub(title_w);
-            let left = fill / 2;
-            let right = fill - left;
             stdout.execute(MoveTo(0, top_row))?;
             write!(stdout, "{}", " ".repeat(cols_usize))?;
             stdout.execute(MoveTo(0, top_row))?;
             write!(stdout, "{}", SetForegroundColor(dim_color))?;
-            write!(
-                stdout,
-                "╔{}{}{}╗",
-                "═".repeat(left),
-                title,
-                "═".repeat(right),
-            )?;
+            if self.alert_overlay.is_some() && !self.alert_title.is_empty() {
+                let title = self.alert_title.as_str();
+                let title_w = title.chars().count();
+                let fill = cols_usize.saturating_sub(2).saturating_sub(title_w);
+                let left = fill / 2;
+                let right = fill - left;
+                write!(
+                    stdout,
+                    "╭{}{}{}╮",
+                    "─".repeat(left),
+                    title,
+                    "─".repeat(right),
+                )?;
+            } else {
+                write!(stdout, "╭{}╮", "─".repeat(cols_usize.saturating_sub(2)))?;
+            }
             write!(stdout, "{}", ResetColor)?;
         }
         if ALERT_FRAME_ROWS >= 2 && status_row > 0 {
-            // Bottom border sits on the row immediately above the
-            // status line. With ALERT_FRAME_ROWS=2 the visible_lines
-            // math reserves both rows; this is the bottom one.
             let bot_row = status_row - 1;
             stdout.execute(MoveTo(0, bot_row))?;
             write!(stdout, "{}", " ".repeat(cols_usize))?;
             stdout.execute(MoveTo(0, bot_row))?;
             write!(stdout, "{}", SetForegroundColor(dim_color))?;
-            write!(stdout, "╚{}╝", "═".repeat(cols_usize.saturating_sub(2)),)?;
+            write!(stdout, "╰{}╯", "─".repeat(cols_usize.saturating_sub(2)))?;
             write!(stdout, "{}", ResetColor)?;
         }
         // Heavy block prompt indicator. While running, we tick a 4-stage
@@ -1535,9 +1556,9 @@ impl Renderer {
                 // Side borders flush against the terminal edges.
                 stdout.execute(MoveTo(0, row))?;
                 write!(stdout, "{}", SetForegroundColor(dim_color))?;
-                write!(stdout, "║")?;
+                write!(stdout, "│")?;
                 stdout.execute(MoveTo(cols.saturating_sub(1), row))?;
-                write!(stdout, "║")?;
+                write!(stdout, "│")?;
                 write!(stdout, "{}", ResetColor)?;
                 // Overlay line for this row (if any).
                 if let Some((text, color)) = overlay.get(row_offset) {
@@ -1595,15 +1616,15 @@ impl Renderer {
             let vr_idx = first_visible_visual + row_offset;
             stdout.execute(MoveTo(0, row))?;
             write!(stdout, "{}", " ".repeat(cols as usize))?;
-            // ui-redesign: paint ║ side borders on every input row
-            // so the [ALERT] frame reads as a closed card. Borders
+            // ui-redesign: paint │ side borders on every input row
+            // so the bottom frame reads as a closed card. Borders
             // are painted in theme dim so they recede behind the
             // input text (theme accent / bold-glowed).
             stdout.execute(MoveTo(0, row))?;
             write!(stdout, "{}", SetForegroundColor(dim_color))?;
-            write!(stdout, "║")?;
+            write!(stdout, "│")?;
             stdout.execute(MoveTo(cols.saturating_sub(1), row))?;
-            write!(stdout, "║")?;
+            write!(stdout, "│")?;
             write!(stdout, "{}", ResetColor)?;
             stdout.execute(MoveTo(bottom_indent as u16, row))?;
             // Bold-glow the prompt indicator + input text so they
@@ -1778,13 +1799,20 @@ impl Renderer {
         // write to the terminal's absolute last column. On most
         // terminals, writing the bottom-right cell triggers an
         // implicit scroll-up — that shifts the panel content up by a
-        // row each redraw and eats the DIRGE.SYS frame's top border.
-        let width = (PANEL_WIDTH as usize).saturating_sub(1);
+        // row each redraw and eats the top frame border.
+        let outer_w = (PANEL_WIDTH as usize).saturating_sub(1);
+        // ui-redesign: heavy double-line OUTER frame around the
+        // right panel with `[SYSTEM]` title. Sub-panel lines fit
+        // inside (width = outer_w - 2), each row gets a ║ on either
+        // side painted around the sub-panel content.
+        let inner_w = outer_w.saturating_sub(2);
         let last_row = rows.saturating_sub(1); // status row — leave alone
+        // Reserve top + bottom rows for the outer frame; sub-panels
+        // paint in rows 1..bottom_frame_row.
+        let bottom_frame_row = last_row.saturating_sub(1);
 
-        // Build the rendered lines first so we know how many we have, then
-        // paint top-to-bottom up to last_row-1.
-        let lines = self.build_panel_lines(width, rows);
+        // Build sub-panel lines at inner width.
+        let lines = self.build_panel_lines(inner_w, rows);
 
         // Themed panel colors. Source lines still use the legacy
         // sentinels (Color::Cyan = header, Color::Reset = dim,
@@ -1796,14 +1824,44 @@ impl Renderer {
         let dim = self.color(crate::ui::theme::dim());
         let body = self.color(crate::ui::theme::agent());
 
+        // Paint the outer top border with centered `[SYSTEM]` title.
+        let title = "[SYSTEM]";
+        let title_w = title.chars().count();
+        let fill = outer_w.saturating_sub(2).saturating_sub(title_w);
+        let l = fill / 2;
+        let r = fill - l;
+        stdout.execute(MoveTo(panel_x, 0))?;
+        write!(stdout, "{}", SetForegroundColor(header_color))?;
+        write!(
+            stdout,
+            "╔{}{}{}╗",
+            "═".repeat(l),
+            title,
+            "═".repeat(r),
+        )?;
+        write!(stdout, "{}", ResetColor)?;
+
+        // Paint the divider on every row (column to the left of the
+        // panel frame).
         for row in 0..last_row {
             stdout.execute(MoveTo(divider_x, row))?;
             write!(stdout, "{}", SetForegroundColor(divider_color))?;
             write!(stdout, "│")?;
             write!(stdout, "{}", ResetColor)?;
+        }
 
+        // Sub-panel content occupies rows 1..bottom_frame_row.
+        for row in 1..bottom_frame_row {
+            let idx = (row - 1) as usize;
+            // Outer left border.
             stdout.execute(MoveTo(panel_x, row))?;
-            if let Some((text, color)) = lines.get(row as usize) {
+            write!(stdout, "{}", SetForegroundColor(header_color))?;
+            write!(stdout, "║")?;
+            write!(stdout, "{}", ResetColor)?;
+
+            // Sub-panel line (or blank pad).
+            stdout.execute(MoveTo(panel_x + 1, row))?;
+            if let Some((text, color)) = lines.get(idx) {
                 let painted = match *color {
                     Color::Cyan => header_color,
                     Color::Reset | Color::DarkGrey => dim,
@@ -1813,15 +1871,29 @@ impl Renderer {
                 write!(stdout, "{}", SetForegroundColor(painted))?;
                 write!(stdout, "{}", text)?;
                 write!(stdout, "{}", ResetColor)?;
-                // Pad to panel width so stale text from earlier draws is wiped.
                 let len = text.chars().count();
-                if len < width {
-                    write!(stdout, "{}", " ".repeat(width - len))?;
+                if len < inner_w {
+                    write!(stdout, "{}", " ".repeat(inner_w - len))?;
                 }
             } else {
-                write!(stdout, "{}", " ".repeat(width))?;
+                write!(stdout, "{}", " ".repeat(inner_w))?;
             }
+
+            // Outer right border.
+            stdout.execute(MoveTo(panel_x + outer_w as u16 - 1, row))?;
+            write!(stdout, "{}", SetForegroundColor(header_color))?;
+            write!(stdout, "║")?;
+            write!(stdout, "{}", ResetColor)?;
         }
+
+        // Outer bottom border.
+        if bottom_frame_row > 0 {
+            stdout.execute(MoveTo(panel_x, bottom_frame_row))?;
+            write!(stdout, "{}", SetForegroundColor(header_color))?;
+            write!(stdout, "╚{}╝", "═".repeat(outer_w.saturating_sub(2)))?;
+            write!(stdout, "{}", ResetColor)?;
+        }
+
         Ok(())
     }
 
@@ -1888,52 +1960,23 @@ impl Renderer {
             // Pad by display width too, otherwise an emoji-bearing
             // row left a 1-cell gap before the right border.
             let len = UnicodeWidthStr::width(trimmed.as_str());
-            let pad = inner.saturating_sub(len);
-            // ui-redesign: double-line vertical borders.
-            format!("║{}{}║", trimmed, " ".repeat(pad))
+            let fill = inner.saturating_sub(len);
+            // ui-redesign: center content horizontally. Light single-
+            // line borders for sub-panel rows (heavy double-line is
+            // only on the OUTER pane frame, painted elsewhere).
+            let l = fill / 2;
+            let r = fill - l;
+            format!("│{}{}{}│", " ".repeat(l), trimmed, " ".repeat(r))
         };
-        // Helper: bottom border of a pill (`╚════════╝`).
-        let bottom = || -> String { format!("╚{}╝", "═".repeat(inner)) };
+        // ui-redesign: light rounded bottom for sub-panels.
+        let bottom = || -> String { format!("╰{}╯", "─".repeat(inner)) };
 
-        // ui-redesign: panel header now uses double-line frame with
-        // bracketed title (`╔═══[DIRGE.SYS]═══╗`). Title is centered
-        // in the top border to match the mockup's visual rhythm.
-        let dirge_label = "[DIRGE.SYS]";
-        let dirge_w = dirge_label.chars().count();
-        let dirge_fill = inner.saturating_sub(dirge_w);
-        let dirge_left = dirge_fill / 2;
-        let dirge_right = dirge_fill - dirge_left;
-        out.push((
-            format!(
-                "╔{}{}{}╗",
-                "═".repeat(dirge_left),
-                dirge_label,
-                "═".repeat(dirge_right),
-            ),
-            Color::Cyan,
-        ));
-        // Center cwd inside the inner band so the header / body
-        // both balance horizontally.
-        let cwd_disp = format!(" {} ", d.cwd);
-        let cwd_w = UnicodeWidthStr::width(cwd_disp.as_str()).min(inner);
-        let cwd_fill = inner.saturating_sub(cwd_w);
-        let cwd_left = cwd_fill / 2;
-        let cwd_right = cwd_fill - cwd_left;
-        out.push((
-            format!(
-                "║{}{}{}║",
-                " ".repeat(cwd_left),
-                cwd_disp,
-                " ".repeat(cwd_right),
-            ),
-            Color::White,
-        ));
-        out.push((bottom(), Color::Cyan));
-
-        // ui-redesign: sub-section helper. Each sub-panel uses
-        // double-line frame with bracketed title centered in the
-        // top border (`╔═══[MCP]═══╗`). Item content is centered
-        // horizontally too.
+        // ui-redesign: sub-section helper. Each sub-panel uses LIGHT
+        // rounded borders (`╭───[MCP]───╮ … ╰─╯`) with the bracketed
+        // title centered in the top border. The OUTER right panel
+        // frame uses heavy double-line — painted around all sub-
+        // panels at paint time, not in this builder. Item content
+        // is centered horizontally per user feedback.
         let push_section =
             |out: &mut Vec<(String, Color)>, title: &str, items: Vec<(String, Color)>| {
                 out.push((String::new(), Color::Reset));
@@ -1942,16 +1985,16 @@ impl Renderer {
                 let fill = inner.saturating_sub(label_w);
                 let left = fill / 2;
                 let right = fill - left;
-                let header = format!("╔{}{}{}╗", "═".repeat(left), label, "═".repeat(right),);
+                let header = format!("╭{}{}{}╮", "─".repeat(left), label, "─".repeat(right),);
                 out.push((header, Color::Cyan));
                 if items.is_empty() {
                     out.push((row(" · (none)"), Color::Reset));
                 } else {
                     for (text, color) in items {
-                        // Items arrive with a leading "  "; strip it
-                        // and let `row` re-add the chamber prefix.
+                        // Items arrive with leading "  "; strip and
+                        // let row() recenter.
                         let content = text.strip_prefix("  ").unwrap_or(&text);
-                        out.push((row(&format!(" {}", content)), color));
+                        out.push((row(content), color));
                     }
                 }
                 out.push((bottom(), Color::Cyan));
