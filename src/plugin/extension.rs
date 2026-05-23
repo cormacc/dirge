@@ -83,18 +83,21 @@ pub fn resolve_custom_message_render(
         .to_string();
 
     let rendered: Option<String> = pm.and_then(|pm_arc| {
-        let handler = {
-            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
-            mgr.list_message_renderers()
-                .into_iter()
-                .find(|(t, _)| t == &custom_type)
-                .map(|(_, h)| h)
-        };
-        handler.and_then(|h| {
-            let payload_str = payload.to_string();
-            let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
-            mgr.invoke_message_renderer(&h, &payload_str).ok().flatten()
-        })
+        // M-R2: single PM acquisition for both the registry lookup
+        // and the handler invoke. Holding across the invoke is safe
+        // — the Janet worker is single-threaded, so nothing else can
+        // run on it while we wait — and avoids the lock-release-lock
+        // dance the prior split incurred.
+        let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let handler = mgr
+            .list_message_renderers()
+            .into_iter()
+            .find(|(t, _)| t == &custom_type)
+            .map(|(_, h)| h)?;
+        let payload_str = payload.to_string();
+        mgr.invoke_message_renderer(&handler, &payload_str)
+            .ok()
+            .flatten()
     });
 
     let body = rendered.unwrap_or_else(|| {
@@ -384,7 +387,6 @@ impl LoopTool for JanetLoopTool {
         let pm = self.pm.clone();
         let handler = self.handler.clone();
         let tool_call_id_owned = tool_call_id.to_string();
-        let name_owned = self.name.clone();
         Box::pin(async move {
             // Cancellation pre-flight. The dispatcher (tools.rs)
             // races this whole future against `wait_for_cancel` so
@@ -422,14 +424,15 @@ impl LoopTool for JanetLoopTool {
                     }
                     let r = guard.invoke_plugin_tool(&handler, &args_json, &tcid_for_blocking)?;
                     // H2: drain any harness/emit-tool-progress entries
-                    // the handler pushed during execution. We do this
-                    // under the same lock so a subsequent plugin tool
-                    // can't race in between and steal entries.
-                    let prog = guard
-                        .drain_tool_progress()
-                        .into_iter()
-                        .filter(|(id, _)| id == &tcid_for_blocking)
-                        .collect::<Vec<_>>();
+                    // the handler pushed during execution. Single-
+                    // threaded Janet guarantees every queued entry
+                    // belongs to THIS handler invocation (the slot
+                    // guard in emit-tool-progress ignores calls made
+                    // outside an active tool), so no filtering is
+                    // needed. Drained under the same lock that ran
+                    // the handler so a subsequent plugin tool can't
+                    // observe a stale buffer.
+                    let prog = guard.drain_tool_progress();
                     Ok((r, prog))
                 },
             )
@@ -441,7 +444,7 @@ impl LoopTool for JanetLoopTool {
             // single-threaded; we couldn't interleave during execute).
             // Plugin authors using emit-tool-progress get the events
             // batched but in-order — same observable surface as a
-            // synchronous progress-emitting handler.
+            // synchronous progress-emitting handler (L-R4).
             for (_id, text) in progress_events {
                 on_update(&LoopToolResult {
                     content: vec![serde_json::json!({"type": "text", "text": text})],
@@ -449,7 +452,6 @@ impl LoopTool for JanetLoopTool {
                     terminate: None,
                 });
             }
-            let _ = name_owned;
             Ok(LoopToolResult {
                 content: vec![serde_json::json!({"type": "text", "text": result})],
                 details: Value::Null,

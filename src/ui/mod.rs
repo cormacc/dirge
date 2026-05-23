@@ -2759,6 +2759,7 @@ pub async fn run_interactive(
                             is_running = true;
                         }
                     }
+                    #[cfg(feature = "plugin")]
                     AgentEvent::CustomMessage { payload } => {
                         // Plugin-emitted custom message (P9d).
                         // Resolution lives in `plugin::extension`
@@ -2767,26 +2768,28 @@ pub async fn run_interactive(
                         // here just sanitizes + writes the line.
                         // `None` means `display=false` — the message
                         // stays in the transcript but no chat row.
-                        #[cfg(feature = "plugin")]
-                        let resolved = crate::plugin::extension::resolve_custom_message_render(
+                        // Arm gated under cfg(plugin) because the
+                        // variant can't be constructed without it
+                        // (bridge.rs emits it only for plugin-fed
+                        // LoopMessage::Custom).
+                        if let Some(r) = crate::plugin::extension::resolve_custom_message_render(
                             &payload,
                             plugin_manager,
-                        );
-                        #[cfg(not(feature = "plugin"))]
-                        let resolved: Option<()> = {
-                            let _ = &payload;
-                            None
-                        };
-                        #[cfg(feature = "plugin")]
-                        if let Some(r) = resolved {
+                        ) {
                             let safe = sanitize_output(&r.body);
                             renderer.write_line(
                                 &format!("[{}] {}", r.label, safe),
                                 theme::dim(),
                             )?;
                         }
-                        #[cfg(not(feature = "plugin"))]
-                        let _ = resolved;
+                    }
+                    #[cfg(not(feature = "plugin"))]
+                    AgentEvent::CustomMessage { payload } => {
+                        // No producer exists without the plugin
+                        // feature, so this arm is unreachable in
+                        // practice — but the variant is unconditional
+                        // in event.rs, so the match must handle it.
+                        let _ = payload;
                     }
                     AgentEvent::Interjected { partial_response, tokens } => {
                         was_reasoning = false;
