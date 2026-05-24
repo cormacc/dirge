@@ -2712,9 +2712,16 @@ pub async fn run_interactive(
                         }
                         if tool_chamber_open && !show_details {
                             // (c) chamber on-screen but body suppressed
-                            // — close with a bare bottom so a stale
-                            // `╭─` doesn't swallow the next paint.
-                            let (frame_w, _) = chamber_widths(&renderer);
+                            // — show a single dim "(body hidden)" row
+                            // so the chamber doesn't look like an
+                            // empty box with no content. Then close
+                            // with a bare bottom so a stale `╭─`
+                            // doesn't swallow the next paint.
+                            let (frame_w, inner) = chamber_widths(&renderer);
+                            renderer.write_line(
+                                &chamber_row("(body hidden — show_tool_details=false)", inner),
+                                theme::dim(),
+                            )?;
                             renderer.write_line(&chamber_bottom(frame_w), theme::dim())?;
                             tool_chamber_open = false;
                         }
@@ -5361,12 +5368,12 @@ fn render_collapsed_in_full(
 /// area. Capped at 120 so very wide terminals don't produce sprawling
 /// chambers that overwhelm the content.
 fn chamber_widths(renderer: &Renderer) -> (usize, usize) {
-    // Match ChatPane's 1-cell right margin (`chat.width - 1`) so
-    // chamber borders don't fall into the reserved margin cell and
-    // get clipped — the symptom was `╮` and `╯` vanishing off the
-    // right edge of GLOB / READ / TASK chambers on a narrow terminal.
-    let term_w = renderer.line_width().max(20).saturating_sub(1);
-    let frame_w = term_w.min(120);
+    // Match ChatPane's 1-cell right margin EXACTLY. ChatPane paints
+    // chat content into `chat.width - 1` cells (the last cell is a
+    // reserved margin before the ║ border). Chamber lines pass
+    // through that same painter, so any chamber wider than
+    // `content_width - 1` gets its right `╮`/`╯` corner clipped.
+    let frame_w = renderer.content_width().saturating_sub(1).max(20);
     let inner = frame_w.saturating_sub(4); // `│ ` + ` │`
     (frame_w, inner)
 }
