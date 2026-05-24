@@ -120,6 +120,15 @@ impl PermissionChecker {
         let default_action = config.default.unwrap_or(Action::Ask);
         let doom_loop_action = config.doom_loop.unwrap_or(Action::Ask);
 
+        // Resolve `working_dir` UP-FRONT so the CWD-scoped builtin
+        // allow rules installed below can embed it in their
+        // patterns. The actual struct field is populated from this
+        // same value at the bottom of `new`.
+        let working_dir = working_dir
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+            .to_string_lossy()
+            .to_string();
+
         let mut rules: HashMap<String, Vec<(Pattern, Action)>> = HashMap::new();
 
         // M4 (dirge-ojn): install the builtin-allow list FIRST so user
@@ -164,6 +173,35 @@ impl PermissionChecker {
                 .entry(tool.to_string())
                 .or_default()
                 .push((pattern_for_tool(tool, "**"), Action::Allow));
+        }
+
+        // CWD-scoped builtin-allow for mutating filesystem tools.
+        // Without this, every first write/edit inside the project
+        // prompts the user. Installing `<cwd>/**` as Allow makes
+        // writes inside the working directory silent while preserving
+        // the Ask default for paths outside CWD (the
+        // `external_directory` overlay / `is_external_path` demotion
+        // below still gates writes to `/etc`, the user's home, etc.).
+        //
+        // User-supplied rules and last-match-wins ordering: the
+        // legacy per-tool fields (config.write / config.edit /
+        // config.apply_patch) and the M2 `tools` map are pushed onto
+        // this same Vec AFTER this installer, so a user's explicit
+        // deny for a path INSIDE CWD wins. Session allowlist entries
+        // checked before rules (see `is_session_allowed`) also win.
+        //
+        // Not installed under `working_dir = ""` (config-only init
+        // with no cwd resolution) — without a concrete prefix the
+        // pattern would degenerate to `/**` and silently allow writes
+        // anywhere on the filesystem.
+        if !working_dir.is_empty() {
+            let cwd_glob = format!("{}/**", working_dir.trim_end_matches('/'));
+            for tool in ["write", "edit", "apply_patch"] {
+                rules
+                    .entry(tool.to_string())
+                    .or_default()
+                    .push((pattern_for_tool(tool, &cwd_glob), Action::Allow));
+            }
         }
 
         // Helper: append a `ToolPerm` (Simple or Granular) onto a
@@ -306,10 +344,8 @@ impl PermissionChecker {
             })
             .unwrap_or_default();
 
-        let working_dir = working_dir
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-            .to_string_lossy()
-            .to_string();
+        // `working_dir` was already resolved earlier in this fn (used
+        // by the CWD-scoped builtin allow installer above).
         let working_dir_canonical = canonicalize_for_cache(&working_dir);
 
         PermissionChecker {
@@ -913,12 +949,19 @@ mod tests {
     /// M4 (dirge-ojn): the post-flip defaults.
     /// - Read-only tools in the builtin-allow list don't prompt.
     /// - Mutating / network / code-execution tools fall to the new
-    ///   global Ask default.
+    ///   global Ask default OUTSIDE CWD. (Mutating tools inside the
+    ///   working directory are auto-allowed by the CWD-scoped
+    ///   builtin-allow rule installed alongside the read-only ones
+    ///   — see `path_tool_writes_inside_cwd_auto_allowed` for that
+    ///   path.)
     /// - The `--yolo` mode bypass (via `SecurityMode::Yolo`) still
     ///   short-circuits everything (line 362 of `check_path`).
     /// - An explicit user rule overrides the builtin-allow.
     #[test]
     fn m4_defaults_allow_safe_ask_dangerous() {
+        // `working_dir = /tmp` so the dangerous-tool probes below
+        // hit /opt/... — outside CWD — and exercise the global Ask
+        // default rather than the CWD-scoped allow installer.
         let mut checker = PermissionChecker::new(
             &PermissionConfig::default(),
             SecurityMode::Standard,
@@ -961,10 +1004,12 @@ mod tests {
             "skill",
             "memory",
         ] {
-            let result = checker.check_path(tool, "/tmp/anything.rs");
+            // Path is OUTSIDE working_dir (/tmp) so the CWD-scoped
+            // allow installer does not apply.
+            let result = checker.check_path(tool, "/opt/anywhere/anything.rs");
             assert!(
                 matches!(result, CheckResult::Ask | CheckResult::Denied(_)),
-                "dangerous tool {tool} should Ask or Deny by default; got {result:?}",
+                "dangerous tool {tool} should Ask or Deny outside CWD by default; got {result:?}",
             );
         }
     }
@@ -1001,17 +1046,93 @@ mod tests {
             checker.check_path("edit", "/tmp/x.rs"),
             CheckResult::Denied(_)
         ));
-        // Direct `write` query (no aliasing at checker level):
-        // write has no rules → builtin-not-installed (write isn't
-        // in M4 builtin-allow) → falls to default Ask.
+        // Direct `write` query (no aliasing at checker level): the
+        // CWD-scoped builtin-allow rule only fires for paths inside
+        // working_dir (/tmp here), so probe an OUTSIDE path to
+        // exercise the global Ask default — that's the "write has
+        // no user-configured rules and no in-CWD allow" path the
+        // checker is asserted on.
         assert!(matches!(
-            checker.check_path("write", "/tmp/x.rs"),
+            checker.check_path("write", "/opt/elsewhere/x.rs"),
             CheckResult::Ask
         ));
         // `tools::enforce` is what ties these together. The
         // alias test for that path lives in src/agent/tools/mod.rs
         // (covered indirectly by the bash F1 tests below since
         // write rules drive the redirect-target gate).
+    }
+
+    /// CWD-scoped builtin-allow for mutating tools: writes inside
+    /// the working directory are silent, writes outside still
+    /// prompt. Without this, users had to "allow always" on every
+    /// first write to each new subdir of their project — partly
+    /// from the `parent/*` bug, partly from the post-M4 posture of
+    /// no global allow for write/edit. This test pins both halves
+    /// (inside-allow + outside-ask) on the same checker instance.
+    #[test]
+    fn write_inside_cwd_allowed_outside_cwd_asks() {
+        let mut checker = PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp/proj")),
+        );
+        for tool in ["write", "edit", "apply_patch"] {
+            // Inside CWD: silent.
+            assert!(
+                matches!(
+                    checker.check_path(tool, "/tmp/proj/src/main.rs"),
+                    CheckResult::Allowed
+                ),
+                "{tool} inside CWD must be auto-allowed",
+            );
+            // Nested inside CWD: same.
+            assert!(
+                matches!(
+                    checker.check_path(tool, "/tmp/proj/src/agent/foo.rs"),
+                    CheckResult::Allowed
+                ),
+                "{tool} nested-inside-CWD must be auto-allowed",
+            );
+            // Outside CWD: prompt.
+            assert!(
+                matches!(checker.check_path(tool, "/etc/passwd"), CheckResult::Ask),
+                "{tool} outside CWD must prompt",
+            );
+        }
+    }
+
+    /// A user's explicit `write: { "<cwd>/build/**": deny }` must
+    /// beat the CWD-scoped builtin-allow rule. Last-match-wins is
+    /// already the documented semantics; this pins it for the new
+    /// CWD-allow installer specifically.
+    #[test]
+    fn user_write_deny_overrides_cwd_builtin_allow() {
+        use crate::permission::ToolPerm;
+        use std::collections::HashMap;
+
+        let mut write_rules = HashMap::new();
+        write_rules.insert("/tmp/proj/build/**".to_string(), Action::Deny);
+        let config = PermissionConfig {
+            write: Some(ToolPerm::Granular(write_rules)),
+            ..Default::default()
+        };
+
+        let mut checker = PermissionChecker::new(
+            &config,
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp/proj")),
+        );
+
+        // User's deny beats CWD-allow for the configured subtree.
+        assert!(matches!(
+            checker.check_path("write", "/tmp/proj/build/out.txt"),
+            CheckResult::Denied(_)
+        ));
+        // Outside the user's deny scope, still allowed via CWD-allow.
+        assert!(matches!(
+            checker.check_path("write", "/tmp/proj/src/main.rs"),
+            CheckResult::Allowed
+        ));
     }
 
     /// Explicit user rules override the M4 builtin-allow list.
@@ -1476,30 +1597,30 @@ mod tests {
     fn path_tool_session_allowlist_keeps_one_segment_semantics() {
         let mut cfg = PermissionConfig::default();
         cfg.default = Some(Action::Ask);
+        // The CWD-scoped builtin-allow rule for write/edit/apply_patch
+        // would otherwise intercept any path under `working_dir` and
+        // mask the session-allowlist semantics under test. Pin
+        // `working_dir = /cwd-off-test-axis` and probe paths that
+        // live elsewhere (`/probe/src/...`) so the CWD-allow rule
+        // never matches and the session allowlist alone gates the
+        // decision.
         let mut checker = PermissionChecker::new(
             &cfg,
             SecurityMode::Standard,
-            Some(std::path::PathBuf::from("/tmp")),
+            Some(std::path::PathBuf::from("/cwd-off-test-axis")),
         );
-        // M4 (dirge-ojn): `read` now has a builtin-allow rule
-        // (`**: allow`), so it'd match the nested path too and
-        // bypass the test's session-allowlist semantics. Use
-        // `write` instead — no builtin-allow, falls to the
-        // default Ask, so the session-allowlist contribution can
-        // be tested in isolation. The pattern semantics are
-        // identical between the two tools (both `is_path_tool`).
-        checker.add_session_allowlist("write".to_string(), "src/*");
+        checker.add_session_allowlist("write".to_string(), "/probe/src/*");
 
         // One-segment hit from the session allowlist.
         assert!(matches!(
-            checker.check_path("write", "src/main.rs"),
+            checker.check_path("write", "/probe/src/main.rs"),
             CheckResult::Allowed
         ));
         // Nested path: not in allowlist, falls through to default Ask.
-        let nested = checker.check_path("write", "src/agent/main.rs");
+        let nested = checker.check_path("write", "/probe/src/agent/main.rs");
         assert!(
             matches!(nested, CheckResult::Ask),
-            "src/* must not match nested path; got {:?}",
+            "/probe/src/* must not match nested path; got {:?}",
             nested
         );
     }

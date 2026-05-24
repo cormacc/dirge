@@ -5099,6 +5099,15 @@ fn suggest_pattern(tool: &str, input: &str) -> String {
             format!("{} *", first)
         }
         "read" | "write" | "edit" | "list_dir" => {
+            // Generalize to the parent dir's RECURSIVE subtree. The
+            // previous `parent/*` matched only the immediate
+            // directory (single `*` doesn't span `/` — see
+            // `permission/pattern.rs:92-96`), so after allow-always
+            // on `src/main.rs` the next write to `src/agent/foo.rs`
+            // re-prompted. Maki's `generalize_scope`
+            // (`maki-agent/src/permissions.rs:519`) uses `parent/**`
+            // for the same tools — that's what users expect when
+            // they pick "allow always".
             let path = std::path::Path::new(trimmed);
             let parent = path
                 .parent()
@@ -5107,7 +5116,7 @@ fn suggest_pattern(tool: &str, input: &str) -> String {
             if parent.is_empty() {
                 "**".to_string()
             } else {
-                format!("{}/*", parent)
+                format!("{}/**", parent)
             }
         }
         "grep" | "find_files" => {
@@ -6640,6 +6649,26 @@ mod tests {
     fn suggest_pattern_works_for_non_empty_inputs() {
         assert_eq!(suggest_pattern("bash", "cargo test --all"), "cargo *");
         assert_eq!(suggest_pattern("grep", "fn foo bar"), "fn*");
+    }
+
+    /// User-reported bug: "allow always" on a write inside `src/`
+    /// stored `src/*` (single `*`, no slash-spanning), so the next
+    /// write under `src/agent/…` re-prompted. Maki's equivalent
+    /// (`maki-agent/src/permissions.rs:519`) uses `parent/**`. Pin
+    /// that the fix is in place for every path-shaped tool.
+    #[test]
+    fn suggest_pattern_path_tools_use_recursive_glob() {
+        assert_eq!(suggest_pattern("write", "src/main.rs"), "src/**");
+        assert_eq!(suggest_pattern("edit", "src/main.rs"), "src/**");
+        assert_eq!(
+            suggest_pattern("write", "src/agent/tools/foo.rs"),
+            "src/agent/tools/**"
+        );
+        assert_eq!(suggest_pattern("read", "src/main.rs"), "src/**");
+        assert_eq!(suggest_pattern("list_dir", "src/agent"), "src/**");
+        // Files at the repo root: `Path::parent` is "" — keep the
+        // existing `**` fallback so the rule is broad but explicit.
+        assert_eq!(suggest_pattern("write", "main.rs"), "**");
     }
 
     /// User-reported bug: `[a] allow always` on an MCP tool call
