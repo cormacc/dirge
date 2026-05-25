@@ -91,7 +91,7 @@ pub fn wrap_streamed_assistant<R>(
     signal: Option<crate::agent::agent_loop::tool::AbortSignal>,
 ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send>>
 where
-    R: Clone + Unpin + Send + 'static,
+    R: Clone + Unpin + Send + GetTokenUsage + 'static,
 {
     Box::pin(stream! {
         // Step 1: synthesize Start with an empty partial. Pi
@@ -107,6 +107,9 @@ where
         // `internal_call_id`.
         let mut tool_indices: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+
+        // Token usage captured from the Final(R) provider response.
+        let mut token_usage: Option<super::message::TokenUsage> = None;
 
         loop {
             // Code review R3: honor AbortSignal between chunks.
@@ -334,11 +337,11 @@ where
                         },
                     };
                 }
-                Ok(StreamedAssistantContent::Final(_)) => {
-                    // Provider-specific final-response object.
-                    // Rig captures it on the
-                    // `StreamingCompletionResponse`; we surface
-                    // the assembled message in our Done below.
+                Ok(StreamedAssistantContent::Final(r)) => {
+                    token_usage = r.token_usage().map(|u| super::message::TokenUsage {
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                    });
                 }
                 Err(err) => {
                     yield StreamEvent::Error {
@@ -370,6 +373,7 @@ where
         yield StreamEvent::Done {
             reason: final_message.stop_reason,
             message: final_message,
+            usage: token_usage,
         };
     })
 }
@@ -413,10 +417,16 @@ mod tests {
     use rig::completion::message::{Reasoning, ReasoningContent, Text, ToolCall, ToolFunction};
     use rig::streaming::ToolCallDeltaContent;
 
-    /// Minimal R type for tests — needs Clone + Unpin + Send.
+    /// Minimal R type for tests — needs Clone + Unpin + Send + GetTokenUsage.
     /// We don't actually instantiate it via `Final`.
     #[derive(Clone, Debug)]
     struct TestResponse;
+
+    impl GetTokenUsage for TestResponse {
+        fn token_usage(&self) -> Option<rig::completion::Usage> {
+            None
+        }
+    }
 
     /// Build a stream from a Vec of canned items.
     fn raw_stream(

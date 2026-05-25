@@ -146,10 +146,23 @@ pub enum StreamEvent {
     Done {
         reason: StopReason,
         message: AssistantMessage,
+        /// Token usage from the API response, if reported by the provider.
+        usage: Option<TokenUsage>,
     },
 
     /// Terminal: stream ended with a provider-side error.
     Error { error: String },
+}
+
+/// Token usage from the API response. Carried on the terminal
+/// [`StreamEvent::Done`] so the compaction decision engine can read
+/// `prompt_tokens` without a separate channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenUsage {
+    /// Prompt (input) tokens consumed by this request.
+    pub input_tokens: u64,
+    /// Completion (output) tokens produced by this request.
+    pub output_tokens: u64,
 }
 
 /// Sub-discriminator for `StreamEvent::Delta`. Mirrors pi's nine

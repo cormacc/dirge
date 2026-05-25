@@ -291,7 +291,7 @@ pub async fn run_loop(
             }
 
             // Pi lines 192-194: LLM call.
-            let assistant_msg = stream_assistant_response(
+            let (assistant_msg, token_usage) = stream_assistant_response(
                 &mut current_context,
                 &config,
                 signal.clone(),
@@ -461,7 +461,7 @@ pub async fn run_loop(
                     .and_then(crate::config::context_window_for_model)
                     .unwrap_or(128_000);
                 let decision = context_manager::decide_after_usage(
-                    None, // TODO: pipe usage.prompt_tokens from stream
+                    token_usage.map(|u| u.input_tokens),
                     ctx_max,
                     folded_this_turn,
                 );
@@ -716,6 +716,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
+            usage: None,
             }]))
         })
     }
@@ -958,6 +959,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
+            usage: None,
             }]))
         });
 
@@ -1067,6 +1069,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason: StopReason::ToolUse,
                 message: msg,
+            usage: None,
             }]))
         });
 
@@ -1104,6 +1107,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason: StopReason::ToolUse,
                 message: msg,
+            usage: None,
             }]))
         });
 
@@ -1156,6 +1160,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
+            usage: None,
             }]))
         });
 
@@ -1234,6 +1239,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
+            usage: None,
             }]))
         });
 
@@ -1479,6 +1485,7 @@ mod tests {
                 crate::agent::agent_loop::message::StreamEvent::Done {
                     reason,
                     message: msg,
+                usage: None,
                 },
             ]))
         });
@@ -1576,6 +1583,7 @@ mod tests {
                 crate::agent::agent_loop::message::StreamEvent::Done {
                     reason,
                     message: msg,
+                usage: None,
                 },
             ]))
         });

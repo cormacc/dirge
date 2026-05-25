@@ -131,7 +131,7 @@ pub async fn stream_assistant_response(
     signal: AbortSignal,
     emit: &mpsc::Sender<LoopEvent>,
     stream_fn: &StreamFn,
-) -> AssistantMessage {
+) -> (AssistantMessage, Option<super::message::TokenUsage>) {
     // 1. transformContext (optional, AgentMessage[] → AgentMessage[])
     let messages: Vec<serde_json::Value> = if let Some(transform) = &config.transform_context {
         transform(context.messages.clone()).await
@@ -178,7 +178,7 @@ pub async fn stream_assistant_response(
 
     // 5. Iterate events.
     let mut added_partial = false;
-    let mut final_message: Option<AssistantMessage> = None;
+    let mut final_message: Option<(AssistantMessage, Option<super::message::TokenUsage>)> = None;
 
     while let Some(event) = stream.next().await {
         match event {
@@ -208,28 +208,21 @@ pub async fn stream_assistant_response(
                     })
                     .await;
             }
-            StreamEvent::Done { reason, message } => {
+            StreamEvent::Done { reason, message, usage } => {
                 let mut finalised = message;
                 finalised.stop_reason = reason;
                 finalize(context, &finalised, added_partial, emit).await;
-                final_message = Some(finalised);
+                final_message = Some((finalised, usage));
                 break;
             }
             StreamEvent::Error { error } => {
-                // Pi (agent-loop.ts:343-354): on `error`, call
-                // `response.result()` to get the final message
-                // (carrying the error in its stopReason/
-                // errorMessage). Our stream's error variant
-                // doesn't carry a message — we synthesise one
-                // with stop_reason=Error so the caller can
-                // observe it.
                 let finalised = AssistantMessage {
                     content: Vec::new(),
                     stop_reason: StopReason::Error,
                     error_message: Some(error),
                 };
                 finalize(context, &finalised, added_partial, emit).await;
-                final_message = Some(finalised);
+                final_message = Some((finalised, None));
                 break;
             }
         }
@@ -243,11 +236,11 @@ pub async fn stream_assistant_response(
     // events and broke downstream consumers that expect every
     // assistant turn to be bracketed.
     match final_message {
-        Some(m) => m,
+        Some((m, usage)) => return (m, usage),
         None => {
             let empty = AssistantMessage::new(Vec::new(), StopReason::Stop);
             finalize(context, &empty, added_partial, emit).await;
-            empty
+            return (empty, None);
         }
     }
 }
@@ -350,6 +343,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason: StopReason::Stop,
                 message,
+                usage: None,
             }]))
         })
     }
@@ -404,6 +398,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason: StopReason::Stop,
                 message,
+                usage: None,
             }]))
         });
 
@@ -460,7 +455,7 @@ mod tests {
         let signal = AbortSignal::new();
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(32);
 
-        let final_msg = stream_assistant_response(
+        let (final_msg, _) = stream_assistant_response(
             &mut ctx,
             &config,
             signal,
@@ -712,7 +707,7 @@ mod tests {
         let empty_stream: StreamFn =
             Arc::new(|_ctx, _opts| Box::pin(futures::stream::iter::<Vec<StreamEvent>>(vec![])));
 
-        let final_msg =
+        let (final_msg, _) =
             stream_assistant_response(&mut ctx, &config, signal, &tx, &empty_stream).await;
         drop(tx);
         let mut events = Vec::new();

@@ -611,6 +611,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
+            usage: None,
             }]))
         })
     }
@@ -769,6 +770,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
+            usage: None,
             }]))
         });
 
@@ -909,6 +911,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason: StopReason::Stop,
                 message: msg,
+            usage: None,
             }]))
         });
 

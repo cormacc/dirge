@@ -269,6 +269,7 @@ mod tests {
             StreamEvent::Done {
                 reason: StopReason::Stop,
                 message: assistant_with("hello"),
+                usage: None,
             },
         ]]);
         let wrapped = retrying_stream_fn(inner, RecoveryPolicy::default());
@@ -303,6 +304,7 @@ mod tests {
                 StreamEvent::Done {
                     reason: StopReason::Stop,
                     message: assistant_with("after retry"),
+                    usage: None,
                 },
             ],
         ]);
@@ -426,6 +428,7 @@ mod tests {
             vec![StreamEvent::Done {
                 reason: StopReason::Stop,
                 message: assistant_with("ok"),
+                usage: None,
             }],
         ]);
         let wrapped = retrying_stream_fn(factory, RecoveryPolicy::default());
@@ -513,6 +516,7 @@ mod tests {
             vec![StreamEvent::Done {
                 reason: StopReason::Stop,
                 message: assistant_with("never seen"),
+                usage: None,
             }],
         ]);
         let wrapped = retrying_stream_fn(factory, RecoveryPolicy::default());

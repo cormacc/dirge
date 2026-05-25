@@ -63,6 +63,7 @@ pub use integration::{
 };
 pub use message::{
     AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason, StreamEvent,
+    TokenUsage,
     ToolResultMessage, UserMessage,
 };
 #[cfg(feature = "plugin")]
