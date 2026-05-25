@@ -28,6 +28,7 @@ pub mod bridge;
 #[cfg(test)]
 mod h7_smoke;
 pub mod hooks;
+pub mod inflight;
 pub mod integration;
 pub mod message;
 #[cfg(feature = "plugin")]

@@ -44,6 +44,7 @@
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use super::inflight::InflightSet;
 use super::message::{
     AssistantMessage, ContentBlock, LoopEvent, LoopMessage, StopReason, ToolResultMessage,
 };
@@ -186,6 +187,11 @@ pub async fn run_loop(
     stream_fn: &StreamFn,
 ) -> Vec<LoopMessage> {
     let mut first_turn = true;
+
+    // Inflight set: authoritative running-id tracker.
+    // UI cards consult `inflight.has(call_id)` to derive spinner state.
+    // Port of Reasonix `loop.ts:147` InflightSet.
+    let inflight = InflightSet::new();
 
     // Pi line 167: initial steering poll.
     let mut pending_messages: Vec<LoopMessage> = match &config.get_steering_messages {
@@ -331,9 +337,15 @@ pub async fn run_loop(
             let mut tool_results: Vec<ToolResultMessage> = Vec::new();
             has_more_tool_calls = false;
             if !tool_calls.is_empty() {
-                let batch =
-                    execute_tool_calls(&current_context, &assistant_msg, &config, &signal, emit)
-                        .await;
+                let batch = execute_tool_calls(
+                    &current_context,
+                    &assistant_msg,
+                    &config,
+                    &signal,
+                    emit,
+                    &inflight,
+                )
+                .await;
                 tool_results = batch.messages;
                 has_more_tool_calls = !batch.terminate;
                 for result in &tool_results {
