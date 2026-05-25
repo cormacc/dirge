@@ -420,9 +420,19 @@ impl Renderer {
         use crossterm::ExecutableCommand as _;
         use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
         let mut stdout = std::io::stdout();
-        let _ = stdout.execute(BeginSynchronizedUpdate);
+        // Guard synchronization brackets so they never leak escape
+        // codes into non-TTY stdout (e.g. `cargo test`, CI logs,
+        // redirected output). Terminals ignore unsupported DECSET
+        // sequences, but the raw bytes in test output / logs are
+        // noise.
+        let sync = std::io::IsTerminal::is_terminal(&stdout);
+        if sync {
+            let _ = stdout.execute(BeginSynchronizedUpdate);
+        }
         let draw_result = terminal.draw(|f| render_frame(&scene, f));
-        let _ = stdout.execute(EndSynchronizedUpdate);
+        if sync {
+            let _ = stdout.execute(EndSynchronizedUpdate);
+        }
         draw_result?;
         Ok(())
     }
