@@ -3492,19 +3492,27 @@ pub async fn run_interactive(
                         | "list_symbols" | "get_symbol_body"
                         | "find_definition" | "find_callers" | "find_callees" => {
                             let cwd = session.working_dir.as_str();
-                            let path_hint = if !cwd.is_empty() {
+                            if !cwd.is_empty() {
                                 let abs = crate::permission::checker::resolve_absolute(
                                     &ask_req.input, cwd,
                                 );
-                                if abs.starts_with(cwd) {
-                                    " (inside project)"
+                                let hint = if abs.starts_with(cwd) {
+                                    "(inside project)"
                                 } else {
-                                    " (outside project)"
+                                    "(outside project)"
+                                };
+                                // Show both the raw input AND the resolved absolute
+                                // path so the user can see what file will actually
+                                // be modified — crucial when LLM sends nonsense like
+                                // path: "1" that resolves to /cwd/1.
+                                if abs == ask_req.input || abs == safe_input {
+                                    format!("path: {} {}", abs, hint)
+                                } else {
+                                    format!("path: {} → {} {}", safe_input, abs, hint)
                                 }
                             } else {
-                                ""
-                            };
-                            format!("path: {}{}", safe_input, path_hint)
+                                format!("path: {}", safe_input)
+                            }
                         }
                         "bash" => format!("command: {}", safe_input),
                         "task" | "task_status" => format!("task: {}", safe_input),
