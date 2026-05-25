@@ -232,7 +232,7 @@ pub async fn run_loop(
     // Multi-tier compaction tracking. Port of Reasonix
     // loop.ts:172 `this._foldedThisTurn`.
     // Reset each new user turn; set true when a fold happens.
-    let mut folded_this_turn = false;
+    let mut folded_this_turn: bool;
 
     // Pi line 167: initial steering poll.
     let mut pending_messages: Vec<LoopMessage> = match &config.get_steering_messages {

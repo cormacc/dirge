@@ -180,6 +180,7 @@ fn write_user_lines(renderer: &mut Renderer, text: &str) -> std::io::Result<()> 
 /// to read/write the UI-loop locals directly — only chat-switch
 /// boundaries pay for the swap.
 #[derive(Default)]
+#[allow(dead_code)]
 struct ChatUiState {
     response_buf: String,
     response_start_line: Option<usize>,
@@ -204,6 +205,7 @@ impl ChatUiState {
 /// supplied state slot. Called before switching chats so each chat's
 /// streaming context survives the swap.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn save_chat_ui_state(
     slot: &mut ChatUiState,
     response_buf: &mut String,
@@ -234,6 +236,7 @@ fn save_chat_ui_state(
 /// dirge-ov2 Phase C: inverse of `save_chat_ui_state`. Loads the
 /// supplied state slot into the UI loop's locals after a chat switch.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn load_chat_ui_state(
     slot: &mut ChatUiState,
     response_buf: &mut String,
@@ -615,6 +618,7 @@ fn sanitize_single_line(s: &str, max_chars: usize) -> String {
 /// it as a fresh chamber with the full body. We hold only the last
 /// one — older collapses live in chat history but aren't addressable.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) struct CollapsedToolResult {
     pub tool_name: String,
     pub banner_value: String,
@@ -990,7 +994,7 @@ pub async fn run_interactive(
     // it as a fresh chamber with the full body. Only the most
     // recent collapse is retained — past collapses scroll away into
     // chat history and are not addressable.
-    let mut last_collapsed: Option<CollapsedToolResult> = None;
+    let mut _last_collapsed: Option<CollapsedToolResult> = None;
     #[allow(unused_mut)]
     let mut loop_label: Option<String> = None;
     #[cfg(feature = "loop")]
@@ -1001,9 +1005,7 @@ pub async fn run_interactive(
     rewind_picker.set_monochrome(cli.no_color);
     let mut last_esc: Option<std::time::Instant> = None;
     let mut search_active = false;
-    let mut search_query = String::new();
-    let mut search_matches: Vec<usize> = Vec::new();
-    let mut search_selected = 0usize;
+
 
     // Snapshot plugin-registered shortcuts (P9c). Seeded at UI
     // startup; refreshed at the top of each event loop iteration
@@ -1600,7 +1602,7 @@ pub async fn run_interactive(
                             // from a previous, unrelated turn. New
                             // truncations during the turn populate
                             // it again.
-                            last_collapsed = None;
+                            _last_collapsed = None;
                             #[cfg(feature = "loop")]
                             if loop_state.as_ref().is_some_and(|ls| ls.active) && !text.starts_with('/') {
                                 // Queue the message instead of dropping it.
@@ -2531,7 +2533,7 @@ pub async fn run_interactive(
                                     tool_chamber_open = false;
                                 } else {
                                     // No diff section found, show normally
-                                    last_collapsed = render_tool_output(
+                                    _last_collapsed = render_tool_output(
                                         &mut renderer,
                                         &resolved_name,
                                         &banner_value,
@@ -2542,7 +2544,7 @@ pub async fn run_interactive(
                                     tool_chamber_open = false;
                                 }
                             } else {
-                                last_collapsed = render_tool_output(
+                                _last_collapsed = render_tool_output(
                                     &mut renderer,
                                     &resolved_name,
                                     &banner_value,
@@ -3250,7 +3252,7 @@ pub async fn run_interactive(
                                 // care about results from the new
                                 // attempt, not what got truncated
                                 // before the overflow.
-                                last_collapsed = None;
+                                _last_collapsed = None;
                                 renderer.write_line(
                                     "  ↳ resumed run with compacted history",
                                     theme::dim(),
@@ -5096,6 +5098,7 @@ fn render_tool_output(
 /// Re-render a previously-collapsed result with NO line cap, as a
 /// fresh chamber below the prior chat content. Char ceiling still
 /// applies so a multi-MB output doesn't take forever.
+#[allow(dead_code)]
 fn render_collapsed_in_full(
     renderer: &mut Renderer,
     collapsed: &CollapsedToolResult,
@@ -5166,6 +5169,7 @@ fn chamber_row_with_bg(content: &str, inner: usize, bg_idx: u8) -> String {
 /// lowercase query matches both cases; mixed-case query forces an
 /// exact-case match — handled inside `Atom::new` with
 /// `CaseMatching::Smart`.
+#[allow(dead_code)]
 fn update_search(renderer: &Renderer, query: &str, matches: &mut Vec<usize>, selected: &mut usize) {
     use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
     use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -5206,6 +5210,7 @@ fn update_search(renderer: &Renderer, query: &str, matches: &mut Vec<usize>, sel
     *matches = scored.into_iter().map(|(idx, _)| idx).collect();
 }
 
+#[allow(dead_code)]
 fn draw_search_bar(query: &str, matches: &[usize], selected: usize) -> std::io::Result<()> {
     use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
     use crossterm::terminal::{Clear, ClearType};

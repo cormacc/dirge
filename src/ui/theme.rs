@@ -383,6 +383,7 @@ pub fn banner_secondary() -> Color {
 /// covered the 16-color named palette — a user theme with
 /// `#ff00ff` (vibrant magenta) was treated as dim and lost its
 /// bold attribute.
+#[allow(dead_code)]
 pub fn is_bright(c: Color) -> bool {
     match c {
         Color::Green

@@ -144,6 +144,7 @@ pub struct LeftPanelInfo {
 /// main session is always at index 0; subagent chats start at index
 /// 1. Selection state lives per-chat because a selection in chat A
 /// would be meaningless when chat B is on screen.
+#[allow(dead_code)]
 pub struct ChatSnapshot {
     pub name: String,
     buffer: Vec<LineEntry>,
@@ -433,6 +434,7 @@ impl Renderer {
     /// state to its snapshot, loads the target chat's snapshot into
     /// the Renderer's hot fields, and triggers a viewport repaint via
     /// the next render call. No-op if `idx == active_chat`.
+    #[allow(dead_code)]
     pub fn switch_chat(&mut self, idx: usize) {
         if idx == self.active_chat || idx >= self.chats.len() {
             return;
@@ -461,6 +463,7 @@ impl Renderer {
     /// chat's slot. Called before switching chats and when the
     /// caller wants a consistent persistent state (e.g. session
     /// save).
+    #[allow(dead_code)]
     fn save_active(&mut self) {
         let slot = &mut self.chats[self.active_chat];
         slot.buffer = std::mem::take(&mut self.buffer);
@@ -477,6 +480,7 @@ impl Renderer {
     /// dirge-ov2: load the active chat's snapshot into the hot
     /// fields. Inverse of `save_active`. Called after `switch_chat`
     /// updates `active_chat`.
+    #[allow(dead_code)]
     fn load_active(&mut self) {
         let slot = &mut self.chats[self.active_chat];
         self.buffer = std::mem::take(&mut slot.buffer);
@@ -1286,7 +1290,7 @@ fn wrap_editor(full: &str, cursor_byte: usize, wrap_w: usize) -> (Vec<String>, u
     let mut byte_idx: usize = 0;
     for logical in full.split('\n') {
         let logical_start = byte_idx;
-        let logical_end = logical_start + logical.len();
+        let _logical_end = logical_start + logical.len();
 
         // Word-aware soft wrapping for this logical line.
         let mut cur = String::new();
@@ -1380,6 +1384,7 @@ fn left_truncate(s: &str, max: usize) -> String {
     out
 }
 
+#[allow(dead_code)]
 pub fn copy_to_clipboard(text: &str) {
     let cmds: &[(&str, &[&str])] = &[
         ("wl-copy", &[]),
