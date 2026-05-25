@@ -124,23 +124,26 @@ pub fn is_sensitive_env_name(name: &str) -> bool {
         // none, so they pass naturally; the exclusions here are for
         // tooling env vars that legitimately need to reach bash.
         const SAFE_EXACT: &[&str] = &[
-            "DISPLAY",  // X11 — unrelated despite containing nothing sensitive
-            "TERM",     // terminal type
-            "SHLVL",    // bash nesting
-            "PWD",      // current directory
-            "OLDPWD",   // previous directory
-            "PATH",     // exec path
-            "MANPATH",  // man search path
-            "LANG",     // locale
-            "LC_ALL",   // locale override
-            "LC_CTYPE", // locale ctype
-            "EDITOR",   // user's editor
-            "VISUAL",   // visual editor
-            "PAGER",    // pager
-            "HOSTNAME", // hostname
-            "USER",     // username
-            "LOGNAME",  // login name
-            "HOME",     // home dir
+            "DISPLAY",       // X11 — unrelated despite containing nothing sensitive
+            "TERM",          // terminal type
+            "SHLVL",         // bash nesting
+            "PWD",           // current directory
+            "OLDPWD",        // previous directory
+            "PATH",          // exec path
+            "MANPATH",       // man search path
+            "LANG",          // locale
+            "LC_ALL",        // locale override
+            "LC_CTYPE",      // locale ctype
+            "EDITOR",        // user's editor
+            "VISUAL",        // visual editor
+            "PAGER",         // pager
+            "HOSTNAME",      // hostname
+            "USER",          // username
+            "LOGNAME",       // login name
+            "HOME",          // home dir
+            "SSH_AUTH_SOCK", // SSH agent — needed for git push over SSH
+            "GITHUB_TOKEN",  // GitHub CLI token
+            "GH_TOKEN",      // GitHub CLI token (short form)
         ];
         if SAFE_EXACT.iter().any(|s| &upper == s) {
             return false;
@@ -154,8 +157,6 @@ pub fn is_sensitive_env_name(name: &str) -> bool {
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
         "GITLAB_TOKEN",
         "BITBUCKET_TOKEN",
     ];
@@ -209,8 +210,8 @@ mod tests {
     fn is_sensitive_env_name_matches_explicit_cloud_vars() {
         assert!(is_sensitive_env_name("AWS_ACCESS_KEY_ID"));
         assert!(is_sensitive_env_name("AWS_SESSION_TOKEN"));
-        assert!(is_sensitive_env_name("GH_TOKEN"));
-        assert!(is_sensitive_env_name("GITHUB_TOKEN"));
+        // GH_TOKEN / GITHUB_TOKEN are now SAFE_EXACT — needed for
+        // gh CLI and git operations inside bash children.
     }
 
     #[test]
@@ -233,6 +234,10 @@ mod tests {
         assert!(!is_sensitive_env_name("GOPATH"));
         assert!(!is_sensitive_env_name("VIRTUAL_ENV"));
         assert!(!is_sensitive_env_name("NODE_ENV"));
+        // GitHub / SSH tokens needed for git workflows in bash children.
+        assert!(!is_sensitive_env_name("GITHUB_TOKEN"));
+        assert!(!is_sensitive_env_name("GH_TOKEN"));
+        assert!(!is_sensitive_env_name("SSH_AUTH_SOCK"));
     }
 
     #[test]
