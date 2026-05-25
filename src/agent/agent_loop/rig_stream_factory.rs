@@ -304,11 +304,19 @@ fn value_to_assistant_content(block: &Value) -> Option<AssistantContent> {
 /// Build a rig `ToolDefinition` from one of our `LoopTool`s.
 /// Returns the trio rig actually consumes (name, description,
 /// parameters); label is dropped because rig has no slot for it.
+///
+/// If the tool has a `flat_parameters` schema (auto-detected via
+/// `analyze_schema`), the LLM receives the flat dot-notation
+/// variant so it's less likely to drop deeply nested args.
 pub fn loop_tool_to_rig_definition(tool: &dyn LoopTool) -> ToolDefinition {
+    let parameters = tool
+        .flat_parameters()
+        .cloned()
+        .unwrap_or_else(|| tool.parameters().clone());
     ToolDefinition {
         name: tool.name().to_string(),
         description: tool.description().to_string(),
-        parameters: tool.parameters().clone(),
+        parameters,
     }
 }
 

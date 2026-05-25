@@ -36,6 +36,7 @@ use rig::tool::{ToolDyn, ToolError};
 use serde_json::Value;
 
 use super::result::LoopToolResult;
+use super::schema_flatten::{FlattenDecision, analyze_schema, flatten_schema, nest_arguments};
 use super::tool::{AbortSignal, LoopTool, LoopToolUpdate};
 use super::types::ToolExecutionMode;
 
@@ -45,11 +46,19 @@ use super::types::ToolExecutionMode;
 /// tool's definition (name, description, parameters). The wrapped
 /// tool is shared via `Arc` because `LoopTool` impls are stored as
 /// `Arc<dyn LoopTool>` in `Context.tools` (see `types.rs`).
+///
+/// Schema flattening: if the tool's JSON Schema has >10 leaf params
+/// or >2 levels of nesting, the adapter auto-flattens it at
+/// construction time (Reasonix tools.ts:36-38). The LLM sees flat
+/// dot-notation keys; `prepare_arguments` re-nests them at dispatch.
 pub struct RigToolAdapter {
     inner: Box<dyn ToolDyn>,
     name: String,
     description: String,
     parameters: Value,
+    /// Flattened parameters stored when the schema warrants flattening.
+    /// Port of Reasonix `InternalTool.flatSchema` (tools.ts:37).
+    flat_parameters: Option<Value>,
     execution_mode: Option<ToolExecutionMode>,
 }
 
@@ -58,6 +67,7 @@ impl std::fmt::Debug for RigToolAdapter {
         f.debug_struct("RigToolAdapter")
             .field("name", &self.name)
             .field("execution_mode", &self.execution_mode)
+            .field("has_flat_schema", &self.flat_parameters.is_some())
             .finish()
     }
 }
@@ -72,18 +82,29 @@ impl RigToolAdapter {
     /// needs prompt-conditional definitions, the loop will need
     /// to expose a per-turn definition rebuild path. Documented
     /// as a deferred concern.
+    ///
+    /// Auto-analyzes the schema; if it's deep (>2) or wide (>10
+    /// leaves), flattens it and stores the flat variant so
+    /// `prepare_arguments` can re-nest at dispatch (Reasonix
+    /// tools.ts:36-38).
     pub async fn new(inner: Box<dyn ToolDyn>) -> Self {
         let def = inner.definition(String::new()).await;
+        let flat_parameters = match analyze_schema(&def.parameters) {
+            FlattenDecision {
+                should_flatten: true,
+                ..
+            } => Some(flatten_schema(&def.parameters)),
+            _ => None,
+        };
         Self {
             inner,
             name: def.name,
             description: def.description,
             parameters: def.parameters,
+            flat_parameters,
             execution_mode: None,
         }
     }
-
-    /// Force this tool into sequential execution. Use for tools
     /// that mutate shared filesystem state or process state
     /// (bash, edit, write, apply_patch) to prevent concurrent
     /// races. Phase 3's umbrella dispatcher detects this and
@@ -108,6 +129,7 @@ impl RigToolAdapter {
             name,
             description,
             parameters,
+            flat_parameters: None,
             execution_mode: None,
         }
     }
@@ -133,15 +155,23 @@ impl LoopTool for RigToolAdapter {
         &self.parameters
     }
 
+    fn flat_parameters(&self) -> Option<&Value> {
+        self.flat_parameters.as_ref()
+    }
+
     fn execution_mode(&self) -> Option<ToolExecutionMode> {
         self.execution_mode
     }
 
-    /// Rig tools self-parse via serde; no shim needed. Defaults
-    /// to identity (inherited from the trait default but stated
-    /// here for the side-by-side audit).
+    /// Re-nests flat dot-notation args when the schema was
+    /// flattened. Port of Reasonix `dispatch()` re-nest
+    /// (tools.ts:126-130). Otherwise identity.
     fn prepare_arguments(&self, args: Value) -> Value {
-        args
+        if self.flat_parameters.is_some() {
+            nest_arguments(&args)
+        } else {
+            args
+        }
     }
 
     fn execute<'a>(

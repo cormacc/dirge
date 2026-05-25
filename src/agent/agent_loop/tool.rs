@@ -97,6 +97,17 @@ pub trait LoopTool: Send + Sync + std::fmt::Debug {
     /// front tools with wildly different arg shapes.
     fn parameters(&self) -> &Value;
 
+    /// Flattened variant of `parameters` for deep/wide schemas.
+    /// When `Some`, the LLM sees the flat schema (dot-notation
+    /// keys) and the dispatch re-nests args before calling
+    /// `execute`. Port of Reasonix `InternalTool.flatSchema`
+    /// (tools.ts:37).
+    ///
+    /// Default: `None` (no flattening).
+    fn flat_parameters(&self) -> Option<&Value> {
+        None
+    }
+
     /// Per-tool execution-mode override. `None` means "use the
     /// loop's default mode". Returning `Sequential` forces the
     /// whole batch sequential per pi's tool-execution semantics

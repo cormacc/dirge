@@ -38,6 +38,7 @@ pub mod rig_stream;
 pub mod rig_stream_factory;
 pub mod rig_tool;
 pub mod run;
+pub mod schema_flatten;
 pub mod steering;
 pub mod storm;
 pub mod stream;
