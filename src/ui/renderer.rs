@@ -134,6 +134,25 @@ pub struct LeftPanelInfo {
     pub focus: String,
 }
 
+/// Normalized selection range — `start <= end` in row-major order.
+/// Coordinates are `(buffer_line_idx, char_offset_in_line)`. Used by
+/// the chat pane to apply REVERSED styling to selected cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionRange {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+}
+
+/// Order two selection endpoints into row-major (start, end) so the
+/// renderer never has to handle the upward-drag case mid-paint.
+pub fn normalize_selection_range(a: (usize, usize), b: (usize, usize)) -> SelectionRange {
+    if (a.0, a.1) <= (b.0, b.1) {
+        SelectionRange { start: a, end: b }
+    } else {
+        SelectionRange { start: b, end: a }
+    }
+}
+
 /// Per-chat state saved while a chat is INACTIVE. Mirrors the fields
 /// the active chat uses on the `Renderer` itself; switching chats
 /// swaps state in/out via `save_active` / `load_active`. Keeps the
@@ -246,6 +265,14 @@ pub struct Renderer {
     /// slash commands from the most recent `draw_bottom` call.
     /// Empty when no tab-completion is active.
     cached_completion_preview: String,
+    /// Chat content rect from the most recent `tui_redraw` call.
+    /// Used by `buffer_pos_at` to map mouse `(row, col)` into the
+    /// chat buffer using the actual ratatui layout, not the legacy
+    /// row-1-is-chat-top assumption. `None` until the first paint
+    /// (selection events before the first frame are dropped, which
+    /// matches "no drag is possible because there's nothing on
+    /// screen yet").
+    cached_chat_rect: Option<ratatui::layout::Rect>,
 }
 
 impl Renderer {
@@ -291,6 +318,7 @@ impl Renderer {
             cached_status: String::new(),
             cached_is_running: false,
             cached_completion_preview: String::new(),
+            cached_chat_rect: None,
         })
     }
 
@@ -332,7 +360,11 @@ impl Renderer {
             cached_status,
             cached_is_running,
             cached_completion_preview,
+            cached_chat_rect,
             tui_terminal,
+            selection_active,
+            selection_start,
+            selection_end,
             ..
         } = self;
 
@@ -385,10 +417,36 @@ impl Renderer {
             *input_rows
         };
 
+        // Compute the layout once so we can stash the chat rect for
+        // mouse-coordinate mapping (selection::handle reads
+        // cached_chat_rect to translate row/col → buffer line/char).
+        // render_frame computes its own from the frame's area, but
+        // with the same `(cols, rows, effective_input_rows)` inputs
+        // they're identical. The terminal::size() probe used here
+        // matches what render_frame sees because both go through the
+        // same /dev/tty winsize.
+        let chat_rect_now = crate::ui::tui::layout::Layout::new(
+            cols_q,
+            rows_q,
+            effective_input_rows,
+        )
+        .chat;
+        *cached_chat_rect = Some(chat_rect_now);
+
+        let chat_selection = if *selection_active {
+            match (*selection_start, *selection_end) {
+                (Some(s), Some(e)) => Some(normalize_selection_range(s, e)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let scene = Scene {
             chat_buffer: buffer,
             scroll_offset: *scroll_offset,
             input_rows: effective_input_rows,
+            chat_selection,
             panel_data,
             left_info: left_panel_info,
             subagents: subagent_status,
@@ -747,44 +805,50 @@ impl Renderer {
     }
 
     /// Map a screen `(row, col)` to a `(line_idx, char_col)` anchor for
-    /// granular selection. `col` is the absolute terminal column; we
-    /// subtract `content_indent()` to get the char offset within the
-    /// rendered line, clamped to the line's char count so dragging
-    /// past the right edge anchors at the end-of-line.
+    /// granular selection. Uses the ratatui chat rect cached by
+    /// `tui_redraw` so the mapping matches the actual on-screen
+    /// layout (including side-panel gutters on wide terminals).
+    /// Falls back to legacy math when no rect has been cached yet —
+    /// pre-paint events and tests that bypass `tui_redraw`.
     pub fn buffer_pos_at(&self, row: u16, col: u16) -> Option<(usize, usize)> {
         let line_idx = self.buffer_line_at_row(row)?;
         let entry = self.buffer.get(line_idx)?;
-        // L-R3 + B3-8: the column coming in is a DISPLAY offset
-        // (terminal col − indent), but `selected_text` indexes
-        // the strip_ansi-ed line by CHAR. For ASCII the two are
-        // equivalent; for CJK / emoji a display column maps to
-        // half as many chars. Walk the visible string accumulating
-        // display widths until we reach the target column; return
-        // the char index at that point.
         let clean = crate::ui::ansi::strip_ansi(&entry.text);
-        let indent = self.content_indent() as u16;
-        let display_col = if col < indent {
+        let chat_x = self
+            .cached_chat_rect
+            .map(|r| r.x)
+            .unwrap_or(self.content_indent() as u16);
+        let display_col = if col < chat_x {
             0
         } else {
-            (col - indent) as usize
+            (col - chat_x) as usize
         };
         let char_col = display_col_to_char_index(&clean, display_col);
         Some((line_idx, char_col))
     }
 
     pub fn buffer_line_at_row(&self, row: u16) -> Option<usize> {
-        let (_, rows) = self.terminal_size();
-        let visible =
-            rows.saturating_sub(self.input_rows + 1 + ALERT_FRAME_ROWS + CHAT_FRAME_ROWS) as usize;
         let total = self.buffer.len();
         if total == 0 {
             return None;
         }
-        // ui-redesign: row 0 is the chat top frame; chat rows start
-        // at row 1. Map screen row → chat-content row by subtracting
-        // the frame offset; rows above the chat area have no buffer
-        // line.
-        let chat_row = row.checked_sub(1)? as usize;
+
+        // Prefer the cached chat rect (ratatui layout); fall back to
+        // legacy math only when the renderer hasn't painted yet.
+        let (chat_y, visible) = if let Some(rect) = self.cached_chat_rect {
+            (rect.y, rect.height as usize)
+        } else {
+            let (_, rows) = self.terminal_size();
+            let v = rows.saturating_sub(
+                self.input_rows + 1 + ALERT_FRAME_ROWS + CHAT_FRAME_ROWS,
+            ) as usize;
+            (1, v)
+        };
+        if visible == 0 {
+            return None;
+        }
+
+        let chat_row = row.checked_sub(chat_y)? as usize;
         if chat_row >= visible {
             return None;
         }
@@ -796,6 +860,20 @@ impl Renderer {
         let start = start.min(total.saturating_sub(visible));
         let idx = start + chat_row;
         if idx < total { Some(idx) } else { None }
+    }
+
+    /// Cached chat rect from the most recent `tui_redraw` call.
+    /// `None` until the first paint.
+    pub fn chat_rect(&self) -> Option<ratatui::layout::Rect> {
+        self.cached_chat_rect
+    }
+
+    /// Test-only setter for the cached chat rect. Lets unit tests
+    /// (selection::handle, buffer_pos_at across rect shapes) drive
+    /// the coordinate mapping without going through a full paint.
+    #[cfg(test)]
+    pub fn set_chat_rect_for_test(&mut self, rect: ratatui::layout::Rect) {
+        self.cached_chat_rect = Some(rect);
     }
 
     pub fn clear_selection(&mut self) {
@@ -1539,9 +1617,15 @@ mod tests {
 
     /// Create a renderer with a synthetic buffer of `n` short lines so we
     /// can drive scroll/append behavior without touching a real terminal.
-    fn fresh_with_lines(n: usize) -> Renderer {
+    /// If `n` is less than `visible + min_scroll_margin`, pads to that size
+    /// so scroll_line_up actually has room to scroll regardless of terminal
+    /// height. Pass `min_scroll_margin: 15` for typical tests that need 10
+    /// scroll-up presses.
+    fn fresh_with_lines_scrollable(n: usize, min_scroll_margin: usize) -> Renderer {
         let mut r = Renderer::new().expect("renderer");
-        for i in 0..n {
+        let visible = r.visible_lines();
+        let need = (visible + min_scroll_margin).max(n);
+        for i in 0..need {
             r.buffer.push(LineEntry {
                 text: CompactString::new(&format!("line {i}")),
                 color: Color::White,
@@ -1549,6 +1633,12 @@ mod tests {
         }
         r.lines = r.buffer.len() as u16;
         r
+    }
+
+    /// Create a renderer with a synthetic buffer of `n` short lines so we
+    /// can drive scroll/append behavior without touching a real terminal.
+    fn fresh_with_lines(n: usize) -> Renderer {
+        fresh_with_lines_scrollable(n, /* min_scroll_margin */ 15)
     }
 
     /// Absolute index of the first visible line in the current viewport,
@@ -1596,40 +1686,47 @@ mod tests {
     // content, the earlier content must stay in view.
     #[test]
     fn regression_replace_from_keeps_view_anchored_when_scrolled_up() {
-        let mut r = fresh_with_lines(50);
+        // Build a buffer with enough lines that scrolling into the
+        // middle actually works regardless of terminal height.
+        let mut r = fresh_with_lines_scrollable(50, /* margin */ 15);
         for _ in 0..10 {
             r.scroll_line_up();
         }
         let pinned_start = view_start(&r);
 
-        // Replace from line 40 with twice as many lines.
+        // Replace the tail of the buffer (last 10 lines) with twice
+        // as many — simulates a streaming markdown re-render that
+        // grew the current response. The user is scrolled above the
+        // replaced region, so the view must stay anchored.
+        let total = r.buffer.len();
+        let repl_start = total.saturating_sub(10);
         let new_lines: Vec<LineEntry> = (0..20)
             .map(|i| LineEntry {
                 text: CompactString::new(&format!("repl {i}")),
                 color: Color::White,
             })
             .collect();
-        r.replace_from(40, new_lines);
+        r.replace_from(repl_start, new_lines);
 
-        assert_eq!(view_start(&r), pinned_start);
+        assert_eq!(view_start(&r), pinned_start,
+            "view drifted after replace-with-more");
 
-        // Now replace with FEWER lines (response got shorter via re-render).
-        let shorter: Vec<LineEntry> = (0..5)
+        // Now replace with FEWER lines (response got shorter via
+        // re-render). The view should not drift upward past where
+        // the user originally was.
+        let total = r.buffer.len();
+        let repl_start = total.saturating_sub(8);
+        let shorter: Vec<LineEntry> = (0..3)
             .map(|i| LineEntry {
                 text: CompactString::new(&format!("sh {i}")),
                 color: Color::White,
             })
             .collect();
-        // After the first replace, len = 40 + 20 = 60. Now truncate at 40,
-        // extend by 5 → len = 45. delta = -15. The view should attempt to
-        // stay anchored at pinned_start, clamped.
-        r.replace_from(40, shorter);
+        r.replace_from(repl_start, shorter);
         let after = view_start(&r);
-        // It must NOT have drifted upward (smaller absolute index) past where
-        // the user originally was; staying ≥ pinned_start - shrink-room is ok.
         assert!(
             after <= pinned_start,
-            "view must not skip past anchor; was {pinned_start}, now {after}"
+            "view drifted upward: after={after} pinned_start={pinned_start}",
         );
     }
 
