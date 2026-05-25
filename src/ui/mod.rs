@@ -87,6 +87,31 @@ fn with_queue(s: String, n: usize) -> String {
     if n == 0 { s } else { format!("{} q:{}", s, n) }
 }
 
+/// Drive the left-panel subagent map from a chat-event:
+///   - `Spawn`            → insert a `"running"` row (oldest at top).
+///   - `Complete`/`Failed` → REMOVE the row.
+///
+/// The panel is for in-flight tracking only; the full result for a
+/// finished subagent lives in its per-subagent chat (Ctrl-N/P/X to
+/// reach it), so the row would just be visual noise. Earlier code
+/// mutated `state` in place and never removed entries, causing the
+/// panel to accumulate stale `✓`/`✗` rows for every subagent that
+/// ever ran in the session.
+fn apply_subagent_panel_event(
+    rows: &mut indexmap::IndexMap<String, (String, String)>,
+    event: &crate::agent::tools::task::SubagentChatEvent,
+) {
+    use crate::agent::tools::task::SubagentChatEvent as E;
+    match event {
+        E::Spawn { id, prompt } => {
+            rows.insert(id.clone(), ("running".to_string(), prompt.clone()));
+        }
+        E::Complete { id, .. } | E::Failed { id, .. } => {
+            rows.shift_remove(id);
+        }
+    }
+}
+
 /// Print a (possibly multi-line) user-typed message to the chat log
 /// as a single visual message: the first line gets the `<you> `
 /// prefix, continuation lines are indented to align under it, and
@@ -4401,25 +4426,7 @@ pub async fn run_interactive(
                 // — or sees it scroll into view if they're already
                 // on that chat when the event fires.
                 use crate::agent::tools::task::SubagentChatEvent as E;
-                // dirge-gek: track lifecycle for the left panel.
-                // Build a fresh status snapshot after the match
-                // arm updates `subagent_panel_rows`.
-                match &chat_evt {
-                    E::Spawn { id, prompt } => {
-                        subagent_panel_rows
-                            .insert(id.clone(), ("running".to_string(), prompt.clone()));
-                    }
-                    E::Complete { id, .. } => {
-                        if let Some((state, _)) = subagent_panel_rows.get_mut(id) {
-                            *state = "completed".to_string();
-                        }
-                    }
-                    E::Failed { id, .. } => {
-                        if let Some((state, _)) = subagent_panel_rows.get_mut(id) {
-                            *state = "failed".to_string();
-                        }
-                    }
-                }
+                apply_subagent_panel_event(&mut subagent_panel_rows, &chat_evt);
                 match chat_evt {
                     E::Spawn { id, prompt } => {
                         // Truncate the prompt to a short chat name
@@ -5807,6 +5814,120 @@ async fn run_shell_command(cmd: &str, sandbox: &Sandbox) -> anyhow::Result<Strin
 mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
+
+    // ============================================================
+    // apply_subagent_panel_event — left-panel cleanup
+    // ============================================================
+
+    use crate::agent::tools::task::SubagentChatEvent as E;
+
+    /// Spawn → row appears in "running" state with the prompt.
+    #[test]
+    fn subagent_panel_spawn_inserts_running_row() {
+        let mut rows = indexmap::IndexMap::new();
+        apply_subagent_panel_event(
+            &mut rows,
+            &E::Spawn {
+                id: "abc123".into(),
+                prompt: "build the binary".into(),
+            },
+        );
+        assert_eq!(rows.len(), 1);
+        let (state, prompt) = rows.get("abc123").unwrap();
+        assert_eq!(state, "running");
+        assert_eq!(prompt, "build the binary");
+    }
+
+    /// Complete → row is REMOVED (the bug being fixed). Previously
+    /// the row's state changed to "completed" and the entry stayed
+    /// in the map forever, accumulating stale ✓ glyphs in the panel.
+    #[test]
+    fn subagent_panel_complete_removes_row() {
+        let mut rows = indexmap::IndexMap::new();
+        apply_subagent_panel_event(
+            &mut rows,
+            &E::Spawn {
+                id: "abc123".into(),
+                prompt: "build the binary".into(),
+            },
+        );
+        apply_subagent_panel_event(
+            &mut rows,
+            &E::Complete {
+                id: "abc123".into(),
+                result: "ok".into(),
+            },
+        );
+        assert!(rows.is_empty(), "completed subagent must be removed");
+    }
+
+    /// Failed → row is REMOVED (same cleanup contract as Complete).
+    #[test]
+    fn subagent_panel_failed_removes_row() {
+        let mut rows = indexmap::IndexMap::new();
+        apply_subagent_panel_event(
+            &mut rows,
+            &E::Spawn {
+                id: "xyz789".into(),
+                prompt: "run tests".into(),
+            },
+        );
+        apply_subagent_panel_event(
+            &mut rows,
+            &E::Failed {
+                id: "xyz789".into(),
+                error: "boom".into(),
+            },
+        );
+        assert!(rows.is_empty(), "failed subagent must be removed");
+    }
+
+    /// Mixed: several spawns + one completion leaves the rest in
+    /// place and preserves insertion order (oldest at top).
+    #[test]
+    fn subagent_panel_mixed_lifecycle_preserves_order() {
+        let mut rows = indexmap::IndexMap::new();
+        for id in ["a", "b", "c"] {
+            apply_subagent_panel_event(
+                &mut rows,
+                &E::Spawn {
+                    id: id.into(),
+                    prompt: format!("task {id}"),
+                },
+            );
+        }
+        // Remove the middle one.
+        apply_subagent_panel_event(
+            &mut rows,
+            &E::Complete {
+                id: "b".into(),
+                result: "ok".into(),
+            },
+        );
+        assert_eq!(rows.len(), 2);
+        let remaining: Vec<&str> = rows.keys().map(String::as_str).collect();
+        assert_eq!(
+            remaining,
+            vec!["a", "c"],
+            "shift_remove must preserve insertion order of survivors"
+        );
+    }
+
+    /// Complete/Failed for an unknown id is a no-op (defensive —
+    /// shouldn't happen since Complete always follows Spawn, but if
+    /// the event ordering ever drifts, don't panic).
+    #[test]
+    fn subagent_panel_complete_unknown_id_is_noop() {
+        let mut rows = indexmap::IndexMap::new();
+        apply_subagent_panel_event(
+            &mut rows,
+            &E::Complete {
+                id: "never-spawned".into(),
+                result: "ok".into(),
+            },
+        );
+        assert!(rows.is_empty());
+    }
 
     /// dirge-bfd: Ctrl-F search uses fuzzy matching (nucleo) — typos,
     /// non-contiguous subsequences, and missing characters all match
