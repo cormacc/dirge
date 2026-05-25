@@ -1,3 +1,16 @@
+//! Path resolution helpers for the permission checker.
+//!
+//! Provides canonicalisation, symlink resolution, and
+//! builtin-allow rule installation (CWD-scoped write/edit/apply_patch
+//! and /dev/null exemption). Extracted from `checker.rs`.
+//!
+//! `resolve_absolute` is the public entry point — resolves a
+//! possibly-relative path through the working directory, follows
+//! symlinks, and normalises `..` / `.` components. Used by
+//! `PermissionChecker` and by external callers that need the same
+//! canonical path the permission check ran against (closing the
+//! symlink-swap TOCTOU between check and open).
+
 use std::collections::HashMap;
 use std::path::Path;
 

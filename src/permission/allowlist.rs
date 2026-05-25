@@ -1,3 +1,10 @@
+//! Session allowlist CRUD.
+//!
+//! Thin free functions operating on `Vec<(String, Pattern)>` that
+//! `PermissionChecker` delegates through. Extracted from `checker.rs`
+//! so allowlist logic can be unit-tested without instantiating a
+//! full permission checker with its configuration wiring.
+
 use crate::permission::engine;
 use crate::permission::pattern::Pattern;
 

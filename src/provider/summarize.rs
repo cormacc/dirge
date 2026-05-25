@@ -1,3 +1,9 @@
+//! Compaction summarization.
+//!
+//! Serializes conversation history into a prompt for the summarizer
+//! model and invokes the model with retry logic. Extracted from
+//! `provider/mod.rs`.
+
 use crate::session::{MessageRole, SessionMessage, ToolCallState};
 
 use rig::streaming::StreamingChat;

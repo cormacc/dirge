@@ -1,3 +1,14 @@
+//! Permission classification helpers.
+//!
+//! Pure functions for classifying tools (is this a path tool? is it
+//! high-risk?) and building `Pattern` values with the right `*`
+//! semantics for the tool category. Extracted from `checker.rs` so
+//! they can be unit-tested independently of the `PermissionChecker`
+//! struct's configuration wiring.
+//!
+//! Used by `checker.rs` (through thin delegating methods) and by
+//! `allowlist.rs` (for `pattern_for_tool`).
+
 use crate::permission::pattern::Pattern;
 
 /// Tools that execute external code with broad effects. Accept mode

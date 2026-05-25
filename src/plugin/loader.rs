@@ -1,3 +1,9 @@
+//! Plugin file discovery, loading, and hook registration.
+//!
+//! Contains `load_plugin` (the single-file / directory-plugin loader)
+//! and `HOOK_NAMES` (the centralised hook-name registry). Extracted
+//! from `plugin/mod.rs` so the plugin module's public API stays lean.
+
 /// All hook names the host knows about. Plugins define functions with
 /// these names (bare or stem-prefixed) and the loader hooks them up.
 /// Centralized so the loader and any future telemetry stay in sync.

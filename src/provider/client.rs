@@ -1,3 +1,11 @@
+//! Provider client construction.
+//!
+//! Contains `create_client` — the 8-backend dispatch that builds
+//! rig clients (OpenAI, Anthropic, Gemini, DeepSeek, GLM, Ollama,
+//! OpenRouter, Custom). Extracted from `provider/mod.rs` to keep
+//! the provider module focused on type definitions + agent
+//! construction.
+
 use std::collections::HashMap;
 
 use rig::providers::{anthropic, gemini, ollama, openai, openrouter};

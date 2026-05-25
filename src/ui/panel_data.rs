@@ -1,3 +1,10 @@
+//! Info panel data types.
+//!
+//! `PanelData`, `SubagentStatusRow`, and `LeftPanelInfo` — the three
+//! structs that carry the right-hand side panel's content. Extracted
+//! from `renderer.rs` so the panel painter and the UI loop can share
+//! them without pulling in the full Renderer.
+
 /// Snapshot of the data the info panel displays. Built fresh by the UI loop
 /// at each redraw because the underlying state (todos, modified files, etc.)
 /// is mutated by the agent and we don't want stale reads.

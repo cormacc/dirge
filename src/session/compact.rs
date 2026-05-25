@@ -1,3 +1,9 @@
+//! Session compaction.
+//!
+//! Token-budget checks, summary insertion, and tree-pruning logic.
+//! Extracted from `session/mod.rs` to keep the Session struct file
+//! focused on data model + message operations.
+
 use crate::session::{Compaction, MessageRole, Session, SessionMessage, TreeNode};
 use compact_str::CompactString;
 

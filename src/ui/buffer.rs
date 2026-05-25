@@ -1,6 +1,8 @@
-//! Standalone tests for buffer/input utilities defined in `renderer.rs`.
-//! The types and functions live in `super::renderer`; this module only
-//! houses their tests to keep `renderer.rs` shorter.
+//! Input buffer types and helpers for the editor wrap pipeline.
+//!
+//! `LineEntry`, `SelectionRange`, `ChatSnapshot`, `VisualRow`, and
+//! the `wrap_editor` / `wrap_input` / `display_col_to_char_index`
+//! utilities. Standalone tests live here to keep `renderer.rs` shorter.
 
 #[cfg(test)]
 mod tests {
