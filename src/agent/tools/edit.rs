@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
+use std::path::Path;
 
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, EditArgs, PermCheck, ToolError, check_perm_path_resolve};
@@ -128,6 +129,13 @@ impl Tool for EditTool {
             ));
         }
 
+        // Reject non-absolute paths immediately with a clear error.
+        if !Path::new(&args.path).is_absolute() {
+            return Err(ToolError::Msg(format!(
+                "Path '{}' is not absolute. Edit takes an absolute path like '/home/user/project/file.txt', not a relative path or bare filename.",
+                args.path,
+            )));
+        }
         // Audit H12: pin file operations to the canonical path the
         // permission check resolved.
         let resolved_path =

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
+use std::path::Path;
 
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, PermCheck, ReadArgs, ToolError, check_perm_path_resolve};
@@ -154,6 +155,14 @@ impl Tool for ReadTool {
     }
 
     async fn call(&self, args: ReadArgs) -> Result<String, ToolError> {
+        // Reject non-absolute paths immediately with a clear error.
+        // Same guard as `write` — the schema says "must be absolute."
+        if !Path::new(&args.path).is_absolute() {
+            return Err(ToolError::Msg(format!(
+                "Path '{}' is not absolute. Read takes an absolute path like '/home/user/project/file.txt', not a relative path or bare filename.",
+                args.path,
+            )));
+        }
         // Audit H12: pin the path we'll actually open to the same
         // canonical form the permission check ran against, so a
         // symlink swap between check and open can't land us on a

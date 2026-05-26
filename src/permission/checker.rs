@@ -468,6 +468,15 @@ impl PermissionChecker {
     }
 
     pub fn check_path(&mut self, tool: &str, path: &str) -> CheckResult {
+        // Reject paths that are clearly LLM hallucinations
+        // (e.g. "1", "a", "xy") before they trigger permission
+        // dialogs for non-existent files.  Absolute paths and
+        // relative paths with directory components or file
+        // extensions pass through to the normal check.
+        if let Err(reason) = path::validate_write_path(path) {
+            return CheckResult::Denied(reason);
+        }
+
         // Prompt deny-list runs first, same reasoning as `check`.
         if self.is_prompt_denied(tool) {
             return CheckResult::Denied(format!(

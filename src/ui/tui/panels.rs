@@ -219,24 +219,20 @@ fn paint_subagent_list(buf: &mut Buffer, area: Rect, rows: &[SubagentStatusRow])
     let dim = Style::default().fg(RColor::DarkGray);
     let agent = Style::default().fg(RColor::Green);
     let err = Style::default().fg(RColor::Red);
+    let file_style = Style::default().fg(RColor::DarkGray);
 
-    // Two rows per subagent: short hash line, then indented prompt
-    // line. Format:
-    //
-    //   ⋯ ...b53fcd
-    //      Investigate Clojure project structure …
-    //
-    // Glyph + space prefix = 2 cells; the prompt row indents by 3
-    // cells (under the hash, not the glyph) so wrap reads naturally.
+    // Format: hash line + prompt line (+ file lines if present).
     // Reserve one trailing cell so text doesn't run into the
     // chat-frame divider on the right.
-    let prompt_indent = 3_u16;
+    let id_indent = 3_u16; // indent for hash line after glyph
+    let file_indent = 5_u16; // indent for file lines under hash
     let trailing_pad = 1_usize;
     let cap_rows = area.height.saturating_sub(LEFT_PANEL_TOP_PAD) as usize;
     let mut dy: u16 = LEFT_PANEL_TOP_PAD;
     for row in rows {
-        // Need at least 2 rows for this subagent.
-        if (dy + 2 - LEFT_PANEL_TOP_PAD) as usize > cap_rows {
+        let file_lines = &row.files;
+        let row_height = 2_u16 + file_lines.len() as u16;
+        if (dy + row_height - LEFT_PANEL_TOP_PAD) as usize > cap_rows {
             break;
         }
         let (glyph, style) = match row.state.as_str() {
@@ -260,17 +256,40 @@ fn paint_subagent_list(buf: &mut Buffer, area: Rect, rows: &[SubagentStatusRow])
         buf.set_stringn(area.x, area.y + dy, hash_line, hash_w, style);
         // Prompt line: indented, dim, truncated to fit width.
         let prompt_avail = (area.width as usize)
-            .saturating_sub(prompt_indent as usize)
+            .saturating_sub(id_indent as usize)
             .saturating_sub(trailing_pad);
         let prompt_field: String = row.prompt_short.chars().take(prompt_avail).collect();
         buf.set_stringn(
-            area.x + prompt_indent,
+            area.x + id_indent,
             area.y + dy + 1,
             prompt_field,
             prompt_avail,
             dim,
         );
         dy += 2;
+        // File lines: indented further, dim, one per file.
+        for file in file_lines {
+            let file_avail = (area.width as usize)
+                .saturating_sub(file_indent as usize)
+                .saturating_sub(trailing_pad);
+            let file_field: String = if file.len() <= file_avail {
+                file.clone()
+            } else {
+                // Left-truncate to preserve basename.
+                format!(
+                    "…{}",
+                    &file[file.len().saturating_sub(file_avail.saturating_sub(1))..]
+                )
+            };
+            buf.set_stringn(
+                area.x + file_indent,
+                area.y + dy,
+                file_field,
+                file_avail,
+                file_style,
+            );
+            dy += 1;
+        }
     }
 }
 
@@ -545,28 +564,32 @@ mod tests {
                 id_short: "abc123".into(),
                 state: "running".into(),
                 prompt_short: "do thing".into(),
+                files: vec!["src/main.rs".into(), "src/lib.rs".into()],
             },
             SubagentStatusRow {
                 id_short: "def456".into(),
                 state: "completed".into(),
                 prompt_short: "done".into(),
+                files: vec![],
             },
         ];
-        let mut backend = TestBackend::new(30, 6);
+        let mut backend = TestBackend::new(30, 7);
         let mut terminal = Terminal::new(backend.clone()).unwrap();
         terminal
             .draw(|f| {
-                let area = Rect::new(0, 0, 30, 6);
+                let area = Rect::new(0, 0, 30, 7);
                 f.render_widget(LeftPanel::new(&info, &subs), area);
             })
             .unwrap();
         backend = terminal.backend().clone();
-        // Two-row format with one row of top padding:
+        // Format with file lines on the first subagent:
         //   row 0: blank (LEFT_PANEL_TOP_PAD)
         //   row 1: ⋯ ...bc123       (hash line for subagent 0)
         //   row 2:    do thing       (prompt line, indented)
-        //   row 3: ✓ ...ef456       (hash line for subagent 1)
-        //   row 4:    done
+        //   row 3:      src/main.rs  (file line)
+        //   row 4:      src/lib.rs   (file line)
+        //   row 5: ✓ ...ef456       (hash line for subagent 1)
+        //   row 6:    done
         let row_at = |y: u16| -> String {
             (0..30)
                 .map(|x| backend.buffer().cell((x, y)).unwrap().symbol().to_string())
@@ -578,12 +601,14 @@ mod tests {
             row_at(1)
         );
         assert!(row_at(2).contains("do thing"), "row2 = {:?}", row_at(2));
+        assert!(row_at(3).contains("src/main.rs"), "row3 = {:?}", row_at(3));
+        assert!(row_at(4).contains("src/lib.rs"), "row4 = {:?}", row_at(4));
         assert!(
-            row_at(3).starts_with("✓ ...def456"),
-            "row3 = {:?}",
-            row_at(3)
+            row_at(5).starts_with("✓ ...def456"),
+            "row5 = {:?}",
+            row_at(5)
         );
-        assert!(row_at(4).contains("done"), "row4 = {:?}", row_at(4));
+        assert!(row_at(6).contains("done"), "row6 = {:?}", row_at(6));
     }
 
     /// RightPanel stacks sub-panels and shows their titles.

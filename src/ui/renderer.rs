@@ -38,11 +38,26 @@ impl std::io::Write for BackendWriter {
 
 fn build_tui_terminal()
 -> Option<ratatui::Terminal<ratatui::backend::CrosstermBackend<BackendWriter>>> {
-    let writer = match crate::ui::terminal::open_tty_for_write() {
-        Some(f) => BackendWriter::Tty(f),
-        None => BackendWriter::Stdout(std::io::stdout()),
-    };
-    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(writer)).ok()
+    // Never open /dev/tty or stdout for painting during tests.
+    // cargo test captures stdout but /dev/tty still points at the
+    // real terminal.  Multiple test threads calling tui_redraw
+    // (via write_line / scroll_to_bottom / render_viewport) would
+    // interleave ratatui escape sequences directly onto the user's
+    // screen, corrupting the terminal and triggering spurious
+    // behaviours (form-feed print dialogs, colour leaks, cursor
+    // jumps).  Returning None makes tui_redraw a no-op.
+    #[cfg(test)]
+    {
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        let writer = match crate::ui::terminal::open_tty_for_write() {
+            Some(f) => BackendWriter::Tty(f),
+            None => BackendWriter::Stdout(std::io::stdout()),
+        };
+        ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(writer)).ok()
+    }
 }
 
 #[derive(Clone)]
@@ -454,7 +469,6 @@ impl Renderer {
     /// state to its snapshot, loads the target chat's snapshot into
     /// the Renderer's hot fields, and triggers a viewport repaint via
     /// the next render call. No-op if `idx == active_chat`.
-    #[allow(dead_code)]
     pub fn switch_chat(&mut self, idx: usize) {
         if idx == self.active_chat || idx >= self.chats.len() {
             return;
@@ -462,6 +476,54 @@ impl Renderer {
         self.save_active();
         self.active_chat = idx;
         self.load_active();
+    }
+
+    /// Cycle to the next chat (wraps from last → first).
+    /// No-op when there's only one chat.
+    pub fn next_chat(&mut self) {
+        if self.chats.len() <= 1 {
+            return;
+        }
+        let next = if self.active_chat + 1 >= self.chats.len() {
+            0
+        } else {
+            self.active_chat + 1
+        };
+        self.switch_chat(next);
+    }
+
+    /// Cycle to the previous chat (wraps from first → last).
+    /// No-op when there's only one chat.
+    pub fn prev_chat(&mut self) {
+        if self.chats.len() <= 1 {
+            return;
+        }
+        let prev = if self.active_chat == 0 {
+            self.chats.len() - 1
+        } else {
+            self.active_chat - 1
+        };
+        self.switch_chat(prev);
+    }
+
+    /// Remove a chat by index. The active chat is adjusted:
+    /// - If `idx < active`, active shifts down by 1.
+    /// - If `idx == active`, moves to idx (which becomes the next
+    ///   chat after removal) or wraps to 0 if at the end.
+    /// - If `idx > active`, active stays unchanged.
+    /// Refuses to remove the last remaining chat.
+    pub fn remove_chat(&mut self, idx: usize) {
+        if self.chats.len() <= 1 || idx >= self.chats.len() {
+            return;
+        }
+        self.chats.remove(idx);
+        if idx < self.active_chat {
+            self.active_chat -= 1;
+        } else if idx == self.active_chat {
+            if self.active_chat >= self.chats.len() {
+                self.active_chat = 0;
+            }
+        }
     }
 
     pub fn active_chat(&self) -> usize {
@@ -483,7 +545,6 @@ impl Renderer {
     /// chat's slot. Called before switching chats and when the
     /// caller wants a consistent persistent state (e.g. session
     /// save).
-    #[allow(dead_code)]
     fn save_active(&mut self) {
         let slot = &mut self.chats[self.active_chat];
         slot.buffer = std::mem::take(&mut self.buffer);
@@ -500,7 +561,6 @@ impl Renderer {
     /// dirge-ov2: load the active chat's snapshot into the hot
     /// fields. Inverse of `save_active`. Called after `switch_chat`
     /// updates `active_chat`.
-    #[allow(dead_code)]
     fn load_active(&mut self) {
         let slot = &mut self.chats[self.active_chat];
         self.buffer = std::mem::take(&mut slot.buffer);
@@ -1578,6 +1638,76 @@ mod tests {
         // Out-of-range index is a no-op (defensive — caller bug).
         r.switch_chat(99);
         assert_eq!(r.active_chat(), 1);
+    }
+
+    /// next_chat wraps around from last → first.
+    #[test]
+    fn next_chat_cycles_forward_with_wrap() {
+        let mut r = Renderer::new().expect("renderer");
+        r.add_chat("one");
+        r.add_chat("two");
+        assert_eq!(r.chat_count(), 3); // main + one + two
+        assert_eq!(r.active_chat(), 0);
+        r.next_chat();
+        assert_eq!(r.active_chat(), 1);
+        r.next_chat();
+        assert_eq!(r.active_chat(), 2);
+        r.next_chat(); // wrap
+        assert_eq!(r.active_chat(), 0);
+    }
+
+    /// prev_chat wraps around from first → last.
+    #[test]
+    fn prev_chat_cycles_backward_with_wrap() {
+        let mut r = Renderer::new().expect("renderer");
+        r.add_chat("one");
+        r.add_chat("two");
+        assert_eq!(r.chat_count(), 3);
+        // prev from 0 wraps to 2
+        r.prev_chat();
+        assert_eq!(r.active_chat(), 2);
+        r.prev_chat();
+        assert_eq!(r.active_chat(), 1);
+        r.prev_chat();
+        assert_eq!(r.active_chat(), 0);
+    }
+
+    /// next/prev are no-ops with only one chat.
+    #[test]
+    fn next_prev_noop_with_single_chat() {
+        let mut r = Renderer::new().expect("renderer");
+        assert_eq!(r.chat_count(), 1);
+        r.next_chat();
+        assert_eq!(r.active_chat(), 0);
+        r.prev_chat();
+        assert_eq!(r.active_chat(), 0);
+    }
+
+    /// remove_chat removes a chat and adjusts active_chat.
+    #[test]
+    fn remove_chat_adjusts_active() {
+        let mut r = Renderer::new().expect("renderer");
+        r.add_chat("one");
+        r.add_chat("two");
+        r.add_chat("three");
+        // chats: [main, one, two, three], active=0
+        r.switch_chat(2); // active = "two"
+        assert_eq!(r.active_chat(), 2);
+        // Remove chat 1 ("one") — active stays 2 but now points
+        // to what WAS chat 2 (now shifted to index 1).
+        r.remove_chat(1);
+        assert_eq!(r.chat_count(), 3);
+        assert_eq!(r.active_chat(), 1); // shifted down
+        // Remove active chat — moves to next (or last if at end).
+        r.switch_chat(2); // active = last chat ("three")
+        r.remove_chat(2);
+        assert_eq!(r.active_chat(), 0); // wraps to 0
+
+        // Cannot remove the last remaining chat.
+        let mut r2 = Renderer::new().expect("renderer");
+        r2.remove_chat(0);
+        assert_eq!(r2.chat_count(), 1);
+        assert_eq!(r2.active_chat(), 0);
     }
 
     /// Create a renderer with a synthetic buffer of `n` short lines so we

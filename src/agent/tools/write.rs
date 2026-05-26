@@ -82,6 +82,17 @@ impl Tool for WriteTool {
     }
 
     async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
+        // Reject non-absolute paths immediately with a clear error.
+        // The schema says "must be absolute, not relative" — without
+        // this guard the tool silently resolves "1" to "{cwd}/1" and
+        // creates the file, confusing the model into thinking it wrote
+        // to a real project path.
+        if !Path::new(&args.path).is_absolute() {
+            return Err(ToolError::Msg(format!(
+                "Path '{}' is not absolute. Write takes an absolute path like '/home/user/project/file.txt', not a relative path or bare filename.",
+                args.path,
+            )));
+        }
         // Audit H12: pin file operations to the canonical path the
         // permission check ran against, so a symlink swap can't
         // redirect the write to an unauthorized target.
@@ -235,5 +246,28 @@ mod tests {
         );
         assert!(!out.contains("LSP errors"), "got: {out}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Non-absolute paths (like "1", "file.txt") must be rejected
+    /// immediately with a clear error. Without this guard the tool
+    /// silently resolves "1" → "{cwd}/1" and creates the file, which
+    /// confuses the model into retrying the same nonsense write.
+    #[tokio::test]
+    async fn rejects_non_absolute_path() {
+        let tool = WriteTool::with_cache(None, None, ToolCache::new(), None);
+        for path in ["1", "file.txt", "src/main.rs"] {
+            let err = tool
+                .call(WriteArgs {
+                    path: path.into(),
+                    content: "hello".into(),
+                })
+                .await
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not absolute"),
+                "path {path:?}: expected absolute-path rejection; got: {msg}",
+            );
+        }
     }
 }
