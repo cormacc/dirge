@@ -30,7 +30,6 @@
 //! benefit from parallel dispatch.
 
 use std::pin::Pin;
-use std::sync::Arc;
 
 use rig::tool::{ToolDyn, ToolError};
 use serde_json::Value;
@@ -38,6 +37,9 @@ use serde_json::Value;
 use super::result::LoopToolResult;
 use super::schema_flatten::{FlattenDecision, analyze_schema, flatten_schema, nest_arguments};
 use super::tool::{AbortSignal, LoopTool, LoopToolUpdate};
+
+#[cfg(test)]
+use std::sync::Arc;
 use super::types::ToolExecutionMode;
 
 /// Wraps a `Box<dyn rig::ToolDyn>` and exposes it as a `LoopTool`.

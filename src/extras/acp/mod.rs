@@ -311,6 +311,10 @@ async fn run_prompt(
                 // stream.
             }
             AgentEvent::TurnStart { .. } | AgentEvent::TurnEnd { .. } => {}
+            AgentEvent::UserMessage { .. } => {
+                // Steering-injected user message mid-run — ACP
+                // doesn't support mid-stream interjection; drop.
+            }
             AgentEvent::Interjected { .. } => {
                 // An interjected turn shouldn't reach the ACP bridge —
                 // ACP runs aren't interactive — but bail cleanly if

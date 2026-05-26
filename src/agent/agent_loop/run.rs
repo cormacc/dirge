@@ -49,36 +49,10 @@ use super::inflight::InflightSet;
 use super::message::{
     AssistantMessage, ContentBlock, LoopEvent, LoopMessage, StopReason, ToolResultMessage,
 };
-use super::storm::{StormBreaker, StormReport};
+use super::storm::StormBreaker;
 use super::stream::{StreamFn, stream_assistant_response};
 use super::tool::AbortSignal;
 use super::types::{Context, LoopConfig};
-
-/// Errors from `run_agent_loop_continue`. Pi throws synchronously
-/// (agent-loop.ts:71-76, 128-133) — we return `Result`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoopError {
-    /// `agentLoopContinue` invoked with no context messages. Pi
-    /// throws "Cannot continue: no messages in context".
-    NoMessages,
-    /// `agentLoopContinue` invoked with the LAST context message
-    /// having role=assistant. Pi throws "Cannot continue from
-    /// message role: assistant".
-    CannotContinueFromAssistant,
-}
-
-impl std::fmt::Display for LoopError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LoopError::NoMessages => write!(f, "Cannot continue: no messages in context"),
-            LoopError::CannotContinueFromAssistant => {
-                write!(f, "Cannot continue from message role: assistant")
-            }
-        }
-    }
-}
-
-impl std::error::Error for LoopError {}
 
 /// Build a `StormBreaker` from `LoopConfig`, merging custom
 /// mutating/exempt tool name lists with the built-in defaults.
@@ -144,56 +118,6 @@ pub async fn run_agent_loop(
     }
 
     run_loop(context, new_messages, config, signal, emit, stream_fn).await
-}
-
-/// Public entry point: continue an EXISTING run from the current
-/// context (last message must be a user / toolResult / custom —
-/// NOT assistant). Faithful port of pi `runAgentLoopContinue`
-/// (agent-loop.ts:120).
-///
-/// Pi semantics:
-///   - empty context → throw
-///   - last message is assistant → throw
-///   - otherwise → emit agent_start + turn_start, enter loop with
-///     newMessages = [] (does NOT re-emit user-message events)
-pub async fn run_agent_loop_continue(
-    mut context: Context,
-    config: LoopConfig,
-    signal: AbortSignal,
-    emit: &mpsc::Sender<LoopEvent>,
-    stream_fn: &StreamFn,
-) -> Result<Vec<LoopMessage>, LoopError> {
-    // Pi lines 71-76: empty context check.
-    if context.messages.is_empty() {
-        return Err(LoopError::NoMessages);
-    }
-    // Pi lines 131-133: last-message role check.
-    let last_role = context
-        .messages
-        .last()
-        .and_then(|m| m.get("role"))
-        .and_then(|r| r.as_str())
-        .unwrap_or("");
-    if last_role == "assistant" {
-        return Err(LoopError::CannotContinueFromAssistant);
-    }
-
-    // Heal messages before entering the loop (shrink oversized tool
-    // results, drop unpaired tool calls). Matches the healing done
-    // in spawn_loop_runner for the session-restore path.
-    let heal_result =
-        super::heal::heal_loaded_messages(&context.messages, super::heal::DEFAULT_MAX_RESULT_CHARS);
-    if heal_result.healed_count > 0 {
-        context.messages = heal_result.messages;
-    }
-
-    // Pi lines 135-139: newMessages = []; emit agent_start +
-    // turn_start; enter loop.
-    let new_messages: Vec<LoopMessage> = Vec::new();
-    let _ = emit.send(LoopEvent::AgentStart).await;
-    let _ = emit.send(LoopEvent::TurnStart).await;
-
-    Ok(run_loop(context, new_messages, config, signal, emit, stream_fn).await)
 }
 
 /// The actual loop. Faithful port of pi `runLoop` (agent-loop.ts:155-269).
@@ -1280,115 +1204,6 @@ mod tests {
             interrupt_idx.unwrap() > last_tool_result_end_idx.unwrap(),
             "interrupt should appear AFTER the tool result message_end"
         );
-    }
-
-    // ---- agentLoopContinue tests ----
-
-    /// Port of pi test "should throw when context has no messages"
-    /// (agent-loop.test.ts:1234). Pi throws synchronously; we
-    /// return Err.
-    #[tokio::test]
-    async fn test_continue_errors_on_empty_context() {
-        let factory = canned_factory(vec![]);
-        let (tx, _rx) = mpsc::channel::<LoopEvent>(4);
-        let result = run_agent_loop_continue(
-            empty_context(),
-            build_config(),
-            AbortSignal::new(),
-            &tx,
-            &factory,
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), LoopError::NoMessages);
-    }
-
-    /// Defensive: last message is assistant → error (pi:131-133
-    /// — `runAgentLoopContinue` checks this before entering
-    /// the loop).
-    #[tokio::test]
-    async fn test_continue_errors_when_last_is_assistant() {
-        let mut ctx = empty_context();
-        ctx.messages
-            .push(serde_json::json!({"role": "assistant", "content": "hello"}));
-        let factory = canned_factory(vec![]);
-        let (tx, _rx) = mpsc::channel::<LoopEvent>(4);
-        let result =
-            run_agent_loop_continue(ctx, build_config(), AbortSignal::new(), &tx, &factory).await;
-        assert_eq!(result.unwrap_err(), LoopError::CannotContinueFromAssistant);
-    }
-
-    /// Port of pi test "should continue from existing context
-    /// without emitting user message events" (agent-loop.test.ts:1249).
-    /// Continue does NOT re-emit message_start/message_end for the
-    /// existing user message — only for the new assistant turn.
-    #[tokio::test]
-    async fn test_continue_does_not_reemit_user_message_events() {
-        let mut ctx = empty_context();
-        ctx.messages
-            .push(serde_json::json!({"role": "user", "content": "Hello"}));
-
-        let factory = canned_factory(vec![text_response("Response")]);
-
-        let (tx, mut rx) = mpsc::channel::<LoopEvent>(64);
-        let messages =
-            run_agent_loop_continue(ctx, build_config(), AbortSignal::new(), &tx, &factory)
-                .await
-                .expect("continue");
-        drop(tx);
-
-        // Returned messages: ONLY the new assistant. The
-        // pre-existing user does NOT appear.
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role(), "assistant");
-
-        // No message_end for a user message.
-        let user_message_ends = drain(&mut rx)
-            .await
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    LoopEvent::MessageEnd {
-                        message: LoopMessage::User(_)
-                    }
-                )
-            })
-            .count();
-        assert_eq!(user_message_ends, 0);
-    }
-
-    /// Port of pi test 1291 ("should allow custom message types
-    /// as last message (caller responsibility)"). The
-    /// `run_agent_loop_continue` rejection is keyed on role ==
-    /// "assistant" only — any other role (user / toolResult /
-    /// custom / application-defined) is acceptable as the
-    /// continuation point. The caller's `convert_to_llm` is
-    /// responsible for translating non-LLM roles into something
-    /// the model can see (or filtering them).
-    #[tokio::test]
-    async fn test_continue_accepts_custom_last_message() {
-        // Pre-existing context with a custom-roled last message.
-        // run_agent_loop_continue should NOT error.
-        let mut ctx = empty_context();
-        ctx.messages.push(serde_json::json!({
-            "role": "custom",
-            "text": "Hook content",
-        }));
-
-        // Mock stream returns a final text response so the loop
-        // exits cleanly.
-        let factory = canned_factory(vec![text_response("ok")]);
-        let (tx, _rx) = mpsc::channel::<LoopEvent>(64);
-        let result =
-            run_agent_loop_continue(ctx, build_config(), AbortSignal::new(), &tx, &factory).await;
-
-        // Must NOT error — custom role is accepted.
-        let messages = result.expect("continue should accept custom last message");
-        // Only the new assistant turn is in new_messages
-        // (continue doesn't re-emit the existing context
-        // messages).
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role(), "assistant");
     }
 
     // ============================================================

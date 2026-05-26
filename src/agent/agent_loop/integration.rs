@@ -530,7 +530,7 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
 /// to swap `Vec<Value>` for a typed message list across the
 /// module — when that lands this helper goes away.
 fn loop_message_to_value(msg: &LoopMessage) -> Value {
-    use super::message::{AssistantMessage, ContentBlock, ToolResultMessage};
+    use super::message::{AssistantMessage, ToolResultMessage};
     fn assistant_to_value(a: &AssistantMessage) -> Value {
         serde_json::json!({
             "role": "assistant",
@@ -884,6 +884,7 @@ mod tests {
             AgentEvent::TurnEnd { .. } => "TurnEnd",
             AgentEvent::Interjected { .. } => "Interjected",
             AgentEvent::CustomMessage { .. } => "CustomMessage",
+            AgentEvent::UserMessage { .. } => "UserMessage",
         }
     }
 

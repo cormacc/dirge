@@ -80,46 +80,6 @@ pub fn steering_from_queue(
     })
 }
 
-/// Same as [`steering_from_queue`] but applies an optional
-/// sanitizer to each drained string. Use this when the queue
-/// holds user-typed text that may contain control bytes —
-/// `crate::ui::ansi::strip_controls` is the natural choice.
-///
-/// Phase 4.5e ships only the bare factory; phase 4.5f wires this
-/// variant into `runner.rs` where the existing sanitize policy
-/// is already in scope.
-pub fn steering_from_queue_with_sanitizer<F>(
-    queue: Arc<Mutex<VecDeque<String>>>,
-    mode: QueueMode,
-    sanitize: F,
-) -> GetSteeringMessagesFn
-where
-    F: Fn(&str) -> String + Send + Sync + 'static,
-{
-    let sanitize = Arc::new(sanitize);
-    Arc::new(move || {
-        let queue = queue.clone();
-        let sanitize = sanitize.clone();
-        Box::pin(async move {
-            let drained: Vec<String> = {
-                let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
-                match mode {
-                    QueueMode::All => q.drain(..).collect(),
-                    QueueMode::OneAtATime => q.pop_front().into_iter().collect(),
-                }
-            };
-            drained
-                .into_iter()
-                .map(|content| {
-                    LoopMessage::User(UserMessage {
-                        content: format_steer_user_message(&sanitize(&content)),
-                    })
-                })
-                .collect()
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,35 +183,6 @@ mod tests {
             &messages[0],
             LoopMessage::User(u) if u.content.starts_with(MID_TURN_STEER_WRAPPER) && u.content.ends_with("mid-run")
         ));
-    }
-
-    /// Sanitizer variant runs per-message before wrapping. Lets
-    /// callers strip control bytes (or apply any other
-    /// transform) at the boundary.
-    #[tokio::test]
-    async fn sanitizer_applied_per_message() {
-        let queue = Arc::new(Mutex::new(VecDeque::<String>::from(vec![
-            "hello\x1b[31m world".to_string(),
-            "plain".to_string(),
-        ])));
-        // Test sanitizer: strip ESC, leave everything else.
-        let hook = steering_from_queue_with_sanitizer(queue, QueueMode::All, |s: &str| {
-            s.replace('\x1b', "")
-        });
-        let messages = hook().await;
-        assert_eq!(messages.len(), 2);
-        let contents: Vec<_> = messages
-            .iter()
-            .map(|m| match m {
-                LoopMessage::User(u) => u.content.clone(),
-                _ => panic!("expected User"),
-            })
-            .collect();
-        // ESC stripped from the first; second untouched.
-        // Both wrapped with the steer preamble.
-        assert!(contents[0].starts_with(MID_TURN_STEER_WRAPPER));
-        assert!(contents[0].contains("hello[31m world"));
-        assert!(contents[1].contains("plain"));
     }
 
     /// Same queue can be polled concurrently — Mutex serializes

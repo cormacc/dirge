@@ -29,12 +29,13 @@ use super::types::{Context, TurnUpdate};
 /// small clone overhead for a clean async-fn shape.
 #[derive(Debug, Clone)]
 pub struct BeforeToolCallContext {
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub assistant_message: AssistantMessage,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub tool_call_id: String,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub tool_call_name: String,
-    /// Validated args. The hook may mutate these (via the
-    /// returned `BeforeToolCallReturn.args`) — pi tests this at
-    /// agent-loop.test.ts:310.
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub args: Value,
 }
 
@@ -66,11 +67,17 @@ pub type BeforeToolCallFn = Arc<
 /// `AfterToolCallContext` (types.ts:96).
 #[derive(Debug, Clone)]
 pub struct AfterToolCallContext {
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub assistant_message: AssistantMessage,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub tool_call_id: String,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub tool_call_name: String,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub args: Value,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub result: LoopToolResult,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub is_error: bool,
 }
 
@@ -102,17 +109,13 @@ pub type AfterToolCallFn = Arc<
 ///   `{ message, toolResults, context, newMessages }`
 #[derive(Debug, Clone)]
 pub struct TurnHookContext {
-    /// The assistant message that completed the turn.
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub message: AssistantMessage,
-    /// Tool result messages from this turn (empty if no tools).
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub tool_results: Vec<ToolResultMessage>,
-    /// Current agent context AFTER the turn's assistant + tool
-    /// results have been appended.
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub context: Context,
-    /// Messages this loop invocation will return if it exits at
-    /// this point. Pi semantics: includes initial prompts for
-    /// `agentLoop`; excludes pre-existing context messages for
-    /// `agentLoopContinue` (types.ts:120).
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub new_messages: Vec<LoopMessage>,
 }
 

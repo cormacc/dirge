@@ -33,8 +33,11 @@ pub fn filter_existing_dirs(candidates: &[std::path::PathBuf]) -> Vec<std::path:
 /// hooks are available. Files are listed in load order.
 #[derive(Debug, Clone)]
 pub struct LoadedPlugin {
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub stem: String,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub files: Vec<std::path::PathBuf>,
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     pub hooks_registered: Vec<String>,
 }
 

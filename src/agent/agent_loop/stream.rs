@@ -69,11 +69,13 @@ pub struct LlmContext {
 /// LoopConfig.
 #[derive(Clone)]
 pub struct StreamOptions {
+    #[allow(dead_code)]
     pub api_key: Option<String>,
     pub reasoning: Option<super::types::ThinkingLevel>,
     pub thinking_budgets: Option<super::types::ThinkingBudgets>,
     pub headers: std::collections::HashMap<String, String>,
     pub metadata: std::collections::HashMap<String, serde_json::Value>,
+    #[allow(dead_code)]
     pub request_timeout: Option<std::time::Duration>,
     pub signal: AbortSignal,
 }
@@ -81,6 +83,7 @@ pub struct StreamOptions {
 impl StreamOptions {
     /// Minimal options — only the signal is provided. Used by
     /// tests that don't care about provider-side options.
+    #[cfg(test)]
     pub fn from_signal(signal: AbortSignal) -> Self {
         Self {
             api_key: None,

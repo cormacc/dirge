@@ -47,10 +47,12 @@ use std::sync::Arc;
 
 use futures::stream::StreamExt;
 
-use crate::agent::recovery::{ErrorKind, RecoveryPolicy, classify_error};
+use crate::agent::recovery::{RecoveryPolicy, classify_error};
 
 use super::message::{DeltaPhase, StreamEvent};
 use super::stream::StreamFn;
+
+#[cfg(test)]
 use super::tool::AbortSignal;
 
 /// Wrap an inner `StreamFn` with retry-on-transient-error

@@ -1,7 +1,5 @@
-use compact_str::CompactString;
 use rig::agent::{Agent, AgentBuilder};
 use rig::completion::CompletionModel;
-use rig::providers::openrouter;
 use std::sync::Arc;
 
 use crate::agent::prompt::{SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
@@ -22,9 +20,6 @@ use crate::sandbox::Sandbox;
 #[cfg(feature = "semantic")]
 use crate::semantic::SemanticManager;
 use crate::skill::{self, Skill};
-
-#[allow(dead_code)]
-pub type ZAgent = Agent<openrouter::CompletionModel>;
 
 /// Wrap every tool with `HookedToolDyn` so plugins can intercept calls.
 /// On non-plugin builds this is a no-op identity, so callers can use it
@@ -841,23 +836,6 @@ pub async fn build_loop_tools(
     }
 
     tools
-}
-
-#[allow(dead_code)]
-pub fn create_client(api_key: Option<&str>) -> anyhow::Result<openrouter::Client> {
-    let key = api_key
-        .map(CompactString::new)
-        .or_else(|| {
-            std::env::var("OPENROUTER_API_KEY")
-                .ok()
-                .map(CompactString::new)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No API key found. Set OPENROUTER_API_KEY environment variable or pass --api-key."
-            )
-        })?;
-    Ok(openrouter::Client::new(String::from(key))?)
 }
 
 /// Append a mode-specific reminder to `preamble` based on the active prompt

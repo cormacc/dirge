@@ -1580,6 +1580,13 @@ pub async fn run_interactive(
                                 // queue at turn boundaries and injects it as
                                 // mid-turn guidance within the same iteration.
                                 interjection_queue.lock().unwrap().push_back(text.to_string());
+                                for line in text.lines() {
+                                    let safe_line = sanitize_output(line);
+                                    renderer.write_line(
+                                        &format!("» {}", safe_line),
+                                        theme::dim(),
+                                    )?;
+                                }
                                 renderer.write_line(
                                     "loop active — message queued (will inject at next turn boundary; /loop stop to cancel)",
                                     c_agent(),
@@ -3480,6 +3487,11 @@ pub async fn run_interactive(
                         }
                         #[cfg(not(feature = "plugin"))]
                         let _ = index;
+                    }
+                    AgentEvent::UserMessage { content } => {
+                        write_user_lines(&mut renderer, &content)?;
+                        renderer.write_line("", Color::White)?;
+                        session.add_message(MessageRole::User, &content);
                     }
                 }
                 renderer.draw_bottom(

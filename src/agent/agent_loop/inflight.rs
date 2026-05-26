@@ -45,22 +45,26 @@ impl InflightSet {
     }
 
     /// Check whether an id is currently in the set.
+    #[allow(dead_code)]
     pub fn has(&self, id: &str) -> bool {
         self.ids.lock().map(|ids| ids.contains(id)).unwrap_or(false)
     }
 
     /// Number of ids currently in flight.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.ids.lock().map(|ids| ids.len()).unwrap_or(0)
     }
 
     /// True when no ids are in flight.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.ids.lock().map(|ids| ids.is_empty()).unwrap_or(true)
     }
 
     /// Drop everything — used at session reset.
     /// No-op on an empty set.
+    #[allow(dead_code)]
     pub fn clear(&self) {
         let Ok(mut ids) = self.ids.lock() else {
             tracing::error!("inflight set poisoned, skipping clear");

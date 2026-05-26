@@ -12,16 +12,13 @@
 //! Each file in this directory cites the pi line range it maps to so
 //! divergences can be audited against the reference. Pi is the spec —
 //! we're not redesigning, we're porting.
+//!
+//! After phase 4.5h-6 cutover, the agent_loop module is wired
+//! into production via provider::spawn_runner.
 
-// After phase 4.5h-6 cutover, the agent_loop module is wired
-// into production via provider::spawn_runner. The module also
-// exposes a library-like surface (LoopConfig hook slots, custom
-// message types, optional steering / interjection plumbing,
-// rig-stream helpers, recovery wrapper variants) that's
-// available to future wiring but not all binary-reachable yet.
-// Module-level `dead_code` + `unused_imports` allows cover the
-// transitional state without scattering per-item gates.
-#![allow(dead_code)]
+// Re-exports constitute the module's public API surface. Many are
+// consumed only by test code or external crates; suppress the
+// per-item unused-import warnings on this block.
 #![allow(unused_imports)]
 
 pub mod bridge;
@@ -71,21 +68,25 @@ pub use result::{AfterToolCallResult, BeforeToolCallResult, LoopToolResult};
 pub use retry::retrying_stream_fn;
 pub use rig_stream::{wrap_rig_stream, wrap_streamed_assistant};
 pub use rig_stream_factory::{
-    build_provider_additional_params, loop_tool_to_rig_definition, rig_stream_fn_from_model,
+    build_provider_additional_params, loop_tool_to_rig_definition,
     rig_stream_fn_from_model_with_provider, value_to_rig_message,
 };
+#[cfg(test)]
+pub use rig_stream_factory::rig_stream_fn_from_model;
 pub use rig_tool::RigToolAdapter;
-pub use run::{LoopError, run_agent_loop, run_agent_loop_continue, run_loop};
-pub use steering::{steering_from_queue, steering_from_queue_with_sanitizer};
+pub use run::{run_agent_loop, run_loop};
+pub use steering::steering_from_queue;
 pub use stream::{LlmContext, StreamFn, StreamOptions, stream_assistant_response};
 pub use tool::LoopTool;
 pub use tool_input_repair::{
     RepairKind, RepairResult, format_structured_error, is_path_field_name, validate_and_repair,
 };
 pub use tools::{
-    ExecutedToolCallBatch, ToolCall, execute_tool_calls, execute_tool_calls_from_msg,
-    execute_tool_calls_parallel, execute_tool_calls_sequential, extract_tool_calls,
+    ExecutedToolCallBatch, ToolCall, execute_tool_calls, execute_tool_calls_parallel,
+    execute_tool_calls_sequential, extract_tool_calls,
 };
+#[cfg(test)]
+pub use tools::execute_tool_calls_from_msg;
 pub use types::{
     Context, ConvertToLlmFn, GetApiKeyFn, LoopConfig, QueueMode, ThinkingLevel, ToolExecutionMode,
     TransformContextFn, TurnUpdate,

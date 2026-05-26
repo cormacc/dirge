@@ -176,6 +176,7 @@ pub struct LspManager {
 }
 
 impl LspManager {
+    #[allow(dead_code)]
     pub fn new(spawner: Arc<dyn Spawner>, worktree: impl Into<PathBuf>) -> Self {
         Self::with_servers(spawner, worktree, server::builtin_servers())
     }
@@ -723,12 +724,15 @@ enum SpawnOutcome {
 }
 
 impl ClientEntry {
+    #[allow(dead_code)]
     pub fn server_id(&self) -> &str {
         &self.server_id
     }
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }
+    #[allow(dead_code)]
     pub fn client(&self) -> &LspClient {
         &self.client
     }

@@ -51,6 +51,7 @@ static RE_DSML_PARAM: LazyLock<Regex> = LazyLock::new(|| {
 #[derive(Debug, Clone)]
 pub struct ScavengeResult {
     pub calls: Vec<ToolCall>,
+    #[allow(dead_code)]
     pub notes: Vec<String>,
 }
 

@@ -51,14 +51,16 @@ use std::sync::Arc;
 use rig::OneOrMany;
 use rig::completion::message::{AssistantContent, Message, Reasoning, ToolCall, ToolFunction};
 use rig::completion::{
-    CompletionError, CompletionModel, CompletionRequestBuilder, GetTokenUsage, ToolDefinition,
+    CompletionModel, CompletionRequestBuilder, GetTokenUsage, ToolDefinition,
 };
+#[cfg(test)]
+use rig::completion::CompletionError;
 use serde_json::Value;
 
 use super::message::StreamEvent;
 use super::rig_stream::wrap_rig_stream;
 use super::stream::{LlmContext, StreamFn};
-use super::tool::{AbortSignal, LoopTool};
+use super::tool::LoopTool;
 
 use futures::Stream;
 use std::pin::Pin;
@@ -80,6 +82,7 @@ use std::pin::Pin;
 /// (multi-call). `CompletionModel: Clone` is part of the trait
 /// bounds so this is always cheap (Arc-internally in most rig
 /// impls).
+#[cfg(test)]
 pub fn rig_stream_fn_from_model<M>(
     model: M,
     tools: Vec<ToolDefinition>,
@@ -360,7 +363,7 @@ pub fn build_provider_additional_params(
     provider_name: Option<&str>,
     opts: &super::stream::StreamOptions,
 ) -> Option<serde_json::Value> {
-    use super::types::ThinkingLevel;
+    
     let mut additional = serde_json::Map::new();
 
     // ----- reasoning per provider -----

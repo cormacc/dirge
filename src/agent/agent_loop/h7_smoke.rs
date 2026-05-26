@@ -148,6 +148,9 @@ fn dump_events(events: &[AgentEvent]) {
             AgentEvent::CustomMessage { payload } => {
                 eprintln!("\n[custom_message] {payload}");
             }
+            AgentEvent::UserMessage { content } => {
+                eprintln!("\n[user_message] {content}");
+            }
         }
     }
     eprintln!();

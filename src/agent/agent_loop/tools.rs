@@ -746,6 +746,7 @@ pub async fn execute_tool_calls(
 
 /// Convenience: extract tool calls from the assistant message, then
 /// dispatch through [`execute_tool_calls`].
+#[cfg(test)]
 pub async fn execute_tool_calls_from_msg(
     context: &Context,
     assistant_message: &AssistantMessage,

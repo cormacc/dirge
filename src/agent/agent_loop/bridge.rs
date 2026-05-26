@@ -13,7 +13,7 @@
 //! | `AgentEnd { messages }`                   | `Done { response, tokens, cost }`|
 //! | `TurnStart`                               | `TurnStart { index: counter }`   |
 //! | `TurnEnd { message, tool_results }`       | `TurnEnd { index: counter }`     |
-//! | `MessageStart { User }`                   | (none — UI handles user msgs)    |
+//! | `MessageStart { User }`                   | `UserMessage { content }`        |
 //! | `MessageStart { Assistant }`              | (none — tokens flow from Update) |
 //! | `MessageStart { ToolResult }`             | (none — already via ToolExecutionEnd) |
 //! | `MessageStart { Custom }`                 | (none)                           |
@@ -219,20 +219,22 @@ impl EventBridge {
             }
 
             LoopEvent::MessageStart { message } => {
-                // User / Assistant / ToolResult / Custom message
-                // starts. User/Assistant/ToolResult don't map to a
-                // dirge AgentEvent (token streaming flows from
-                // MessageUpdate, tool results flow from
-                // ToolExecutionEnd, user messages aren't AgentEvents
-                // at all). `Custom` carries plugin-queued payloads;
-                // we surface those as `AgentEvent::CustomMessage` so
-                // the UI can look up a registered renderer (P9d).
-                if let LoopMessage::Custom(payload) = message {
-                    vec![AgentEvent::CustomMessage {
-                        payload: payload.clone(),
-                    }]
-                } else {
-                    Vec::new()
+                match message {
+                    LoopMessage::User(u) => {
+                        vec![AgentEvent::UserMessage {
+                            content: CompactString::from(u.content),
+                        }]
+                    }
+                    LoopMessage::Custom(payload) => {
+                        vec![AgentEvent::CustomMessage {
+                            payload: payload.clone(),
+                        }]
+                    }
+                    // Assistant / ToolResult starts don't map to
+                    // AgentEvents — token streaming flows from
+                    // MessageUpdate, tool results flow from
+                    // ToolExecutionEnd.
+                    _ => Vec::new(),
                 }
             }
 
@@ -849,13 +851,33 @@ mod tests {
         }
     }
 
-    /// finalization separately).
+    /// `MessageStart` for User messages now emits `UserMessage`
+    /// so steering-injected user messages are displayed in the UI
+    /// log. ToolResult and Assistant MessageStart remain no-ops.
+    /// `MessageEnd` is always a no-op.
     #[test]
-    fn message_start_end_are_no_ops() {
+    fn message_start_end_behavior() {
         let mut bridge = EventBridge::new();
         let user_msg = LoopMessage::User(UserMessage {
             content: "hi".to_string(),
         });
+        // User messages now emit UserMessage.
+        let events = bridge.translate(LoopEvent::MessageStart {
+            message: user_msg.clone(),
+        });
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentEvent::UserMessage { content } => assert_eq!(content.as_str(), "hi"),
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+        // MessageEnd is still a no-op for user messages.
+        assert!(bridge
+            .translate(LoopEvent::MessageEnd {
+                message: user_msg
+            })
+            .is_empty());
+
+        // ToolResult MessageStart/End remain no-ops.
         let tool_msg = LoopMessage::ToolResult(ToolResultMessage {
             tool_call_id: "c1".to_string(),
             tool_name: "echo".to_string(),
@@ -863,20 +885,16 @@ mod tests {
             details: serde_json::Value::Null,
             is_error: false,
         });
-        for variant in [user_msg.clone(), tool_msg.clone()] {
-            assert!(
-                bridge
-                    .translate(LoopEvent::MessageStart {
-                        message: variant.clone()
-                    })
-                    .is_empty()
-            );
-            assert!(
-                bridge
-                    .translate(LoopEvent::MessageEnd { message: variant })
-                    .is_empty()
-            );
-        }
+        assert!(bridge
+            .translate(LoopEvent::MessageStart {
+                message: tool_msg.clone()
+            })
+            .is_empty());
+        assert!(bridge
+            .translate(LoopEvent::MessageEnd {
+                message: tool_msg
+            })
+            .is_empty());
     }
 
     /// `MessageUpdate` with End-phase markers are no-ops (the
@@ -989,6 +1007,7 @@ mod tests {
                 AgentEvent::ContextOverflow { .. } => "ContextOverflow",
                 AgentEvent::Interjected { .. } => "Interjected",
                 AgentEvent::CustomMessage { .. } => "CustomMessage",
+                AgentEvent::UserMessage { .. } => "UserMessage",
             })
             .collect();
         assert_eq!(

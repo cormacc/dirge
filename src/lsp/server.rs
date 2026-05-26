@@ -403,6 +403,7 @@ mod override_tests {
 
 /// Returns the descriptors claiming the given file extension (no leading dot,
 /// lowercased internally). Empty when no server claims it.
+#[allow(dead_code)]
 pub fn servers_for_extension(ext: &str) -> Vec<ServerInfo> {
     let ext = ext.trim_start_matches('.').to_lowercase();
     builtin_servers()

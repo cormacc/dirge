@@ -24,14 +24,10 @@
 //! build a box all-at-once use `BoxBuilder`; callers that build
 //! incrementally (tool chambers across multiple events) use the
 //! raw `row`, `top`, `bottom`, `divider` helpers.
-
-// Some helpers are exported as the new public surface for callers
-// to migrate to; not all are wired up yet. `#[allow(dead_code)]`
-// at the module level so the deliberate API surface doesn't fill
-// the build with warnings until the alert / panel / chamber
-// callsites migrate. Each helper IS exercised by tests, so the
-// dead-code lint is correctly noting "no production caller yet".
-#![allow(dead_code)]
+//!
+//! Not all helpers are wired into production callers yet —
+//! individual `#[allow(dead_code)]` annotations mark the
+//! deliberately-exported-but-not-yet-integrated surface.
 
 use compact_str::CompactString;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -50,10 +46,12 @@ pub enum BoxStyle {
     /// outer UI panel frames (left AGENT STATUS, right
     /// SYSTEM & PROJECT DATA, bottom ALERT). Matches the
     /// mockup's framing.
+    #[allow(dead_code)]
     Double,
 }
 
 impl BoxStyle {
+    #[allow(dead_code)]
     pub fn top_left(self) -> char {
         match self {
             BoxStyle::Rounded => '╭',
@@ -113,6 +111,7 @@ impl BoxStyle {
 /// each side; remaining width fills with horizontal dashes.
 /// Width math is display-aware so wide title glyphs don't push the
 /// right corner off.
+#[allow(dead_code)]
 pub fn top(style: BoxStyle, title: &str, total_w: usize) -> String {
     // Review #10: empty title would otherwise render as
     // `╭─  ─{fill}─╮` (two spaces with no glyph between). Match
@@ -186,6 +185,7 @@ pub fn bottom(style: BoxStyle, total_w: usize) -> String {
 /// Build a `├─────┤` divider row sized to `total_w`. Used inside
 /// boxes that have multiple sections (e.g. the permission alert
 /// separates the question and action rows with a divider).
+#[allow(dead_code)]
 pub fn divider(style: BoxStyle, total_w: usize) -> String {
     let inner = total_w.saturating_sub(2);
     format!(
@@ -329,6 +329,7 @@ pub fn expand_tabs(s: &str, tab_stop: usize) -> String {
 // (optionally with dividers), finalize to a Vec<String> the
 // caller paints in order.
 
+#[allow(dead_code)]
 pub struct BoxBuilder {
     style: BoxStyle,
     width: usize,
@@ -336,6 +337,7 @@ pub struct BoxBuilder {
     rows: Vec<RowKind>,
 }
 
+#[allow(dead_code)]
 enum RowKind {
     Text(CompactString),
     Divider,
@@ -344,6 +346,7 @@ enum RowKind {
 impl BoxBuilder {
     /// Start a new box. `width` is the external width
     /// (border-to-border). `title` renders in the top border.
+    #[allow(dead_code)]
     pub fn new(style: BoxStyle, title: impl Into<String>, width: usize) -> Self {
         Self {
             style,
@@ -363,6 +366,7 @@ impl BoxBuilder {
     ///   `wrap::soft_wrap` with no continuation indent. Callers
     ///   needing label-aligned wrapped tails should use
     ///   `row_labelled` instead (review #13).
+    #[allow(dead_code)]
     pub fn row(mut self, content: impl AsRef<str>) -> Self {
         let inner = self.width.saturating_sub(4);
         let s = content.as_ref();
@@ -388,6 +392,7 @@ impl BoxBuilder {
     /// `labelled_rows` shape so a future alert refactor can use
     /// `BoxBuilder` directly. The continuation indent's width is
     /// the display-width of `label + sep`.
+    #[allow(dead_code)]
     pub fn row_labelled(mut self, label: &str, sep: &str, value: &str) -> Self {
         let inner = self.width.saturating_sub(4);
         let prefix = format!("{label}{sep}");
@@ -401,12 +406,14 @@ impl BoxBuilder {
     }
 
     /// Push a horizontal divider (`├──┤`) between rows.
+    #[allow(dead_code)]
     pub fn divider(mut self) -> Self {
         self.rows.push(RowKind::Divider);
         self
     }
 
     /// Finalise to a Vec<String> ready to paint top-to-bottom.
+    #[allow(dead_code)]
     pub fn build(self) -> Vec<String> {
         let mut out: Vec<String> = Vec::with_capacity(self.rows.len() + 2);
         out.push(top(self.style, &self.title, self.width));

@@ -62,11 +62,7 @@ pub enum AgentEvent {
     /// keeps the per-event allocation cheap; the runner emits
     /// many of these per turn.
     ToolStarted {
-        // Only consumed by feature-gated paths (ACP) at present;
-        // UI arm uses `{ .. }`. The field is part of the variant's
-        // documented contract — kept regardless of which features
-        // are compiled.
-        #[allow(dead_code)]
+        #[cfg_attr(not(feature = "acp"), allow(dead_code))]
         id: CompactString,
     },
     ToolResult {
@@ -76,18 +72,7 @@ pub enum AgentEvent {
         /// recent unanswered ToolCall in the same turn).
         id: CompactString,
         output: CompactString,
-        /// Structured classification of `output`. Additive — the
-        /// existing `output: CompactString` remains the
-        /// authoritative payload for the LLM and the default UI
-        /// rendering path. Consumers that want richer rendering
-        /// (ACP resource links, future UI file-card components)
-        /// dispatch on `kind`.
-        ///
-        /// Defaults to `Text`; the runner classifies as `File`
-        /// when the producing tool name is known to surface a
-        /// file reference (`read`, `find_files`, `list_dir`).
-        /// Coarse on purpose — no per-tool plumbing required.
-        #[allow(dead_code)]
+        #[cfg_attr(not(feature = "acp"), allow(dead_code))]
         kind: ToolContent,
     },
     Error(CompactString),
@@ -136,21 +121,24 @@ pub enum AgentEvent {
     },
     /// The runner observed an interjection request at a tool-result boundary
     /// and stopped the stream cleanly. Whatever assistant text had streamed
-    /// so far is captured in `partial_response`. The UI is expected to
-    /// commit it as an assistant message and then drain its interjection
-    /// queue as the next user turn.
+    /// so far is captured in `partial_response`. The UI commits it as an
+    /// assistant message and then drains its interjection queue as the next
+    /// user turn.
     ///
-    /// Phase 4.5h-6: not currently constructed by the new agent_loop
-    /// path. The legacy runner emitted this on graceful stops; the
-    /// new path's interject_tx → signal.cancel() → AgentEvent::Done
-    /// flow covers the same observable behavior. The variant is
-    /// retained because UI matchers reference it and a future commit
-    /// may re-emit it for partial-response capture during graceful
-    /// cancellation.
-    #[allow(dead_code)]
+    /// Constructed by the bridge when the LLM stream is cancelled via the
+    /// interject signal (rig_stream error message "stream aborted by
+    /// cancellation signal" is recognized as a graceful stop, not a hard
+    /// error).
     Interjected {
         partial_response: CompactString,
         tokens: u64,
+    },
+    /// User message injected mid-run via the steering queue.
+    /// The UI renders this as a user chat message so the user sees
+    /// their interjected guidance appear in the log when the agent
+    /// processes it at a turn boundary.
+    UserMessage {
+        content: CompactString,
     },
 }
 

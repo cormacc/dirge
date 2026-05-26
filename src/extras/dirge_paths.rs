@@ -135,6 +135,30 @@ impl ProjectPaths {
 mod tests {
     use super::*;
 
+    /// Mutex that serializes tests that mutate `DIRGE_PROJECT_ROOT`.
+    /// `std::env::set_var` is `unsafe` because environment mutations
+    /// are global state — concurrent tests racing on the same key
+    /// cause flaky failures. Locking this mutex guarantees only one
+    /// env-mutating test runs at a time.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that clears `DIRGE_PROJECT_ROOT` on drop so a
+    /// panic mid-test doesn't leak the override into subsequent tests.
+    struct EnvGuard;
+
+    impl EnvGuard {
+        fn set(value: &str) -> Self {
+            unsafe { std::env::set_var("DIRGE_PROJECT_ROOT", value) };
+            EnvGuard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("DIRGE_PROJECT_ROOT") };
+        }
+    }
+
     /// In the dirge repo itself, `find_git_root` from the current
     /// working directory should resolve to the repo root (where
     /// `.git/` actually lives).
@@ -161,25 +185,25 @@ mod tests {
     /// `DIRGE_PROJECT_ROOT` wins over auto-detection.
     #[test]
     fn env_override_wins_over_git_detection() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir();
-        unsafe { std::env::set_var("DIRGE_PROJECT_ROOT", tmp.to_str().unwrap()) };
+        let _guard = EnvGuard::set(tmp.to_str().unwrap());
         // Even though we're in the dirge repo, the env var wins.
         let cwd = std::env::current_dir().unwrap();
         let root = project_root(&cwd);
         assert_eq!(root, tmp);
-        unsafe { std::env::remove_var("DIRGE_PROJECT_ROOT") };
     }
 
     /// An env var pointing to a non-existent directory is ignored
     /// (graceful fallback to git detection).
     #[test]
     fn env_override_ignores_missing_directory() {
-        unsafe { std::env::set_var("DIRGE_PROJECT_ROOT", "/nonexistent/dirge/project/root") };
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set("/nonexistent/dirge/project/root");
         let cwd = std::env::current_dir().unwrap();
         let root = project_root(&cwd);
         // Should fall through to git detection, not use the bogus path.
         assert_ne!(root, PathBuf::from("/nonexistent/dirge/project/root"));
-        unsafe { std::env::remove_var("DIRGE_PROJECT_ROOT") };
     }
 
     /// All subdirectory accessors nest under `.dirge/`.

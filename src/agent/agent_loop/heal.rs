@@ -16,10 +16,6 @@
 
 use serde_json::Value;
 
-/// Messages are `Vec<Value>` in dirge's transcript. We inspect
-/// `role` and `tool_call_id` fields.
-type ChatMessage = Value;
-
 /// Outcome of a heal pass.
 #[derive(Debug, Clone)]
 pub struct HealResult {

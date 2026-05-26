@@ -89,6 +89,7 @@ pub trait LoopTool: Send + Sync + std::fmt::Debug {
 
     /// UI-display label distinct from the LLM-facing name. Pi
     /// field `label: string` (types.ts:363).
+    #[allow(dead_code)]
     fn label(&self) -> &str;
 
     /// JSON Schema of the tool's arguments. Pi field

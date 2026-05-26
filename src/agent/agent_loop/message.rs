@@ -96,6 +96,7 @@ impl AssistantMessage {
     /// Iterate just the toolCall blocks. Used by the loop's
     /// `executeToolCalls` site (agent-loop.ts:203:
     /// `message.content.filter((c) => c.type === "toolCall")`).
+    #[allow(dead_code)]
     pub fn tool_calls(&self) -> impl Iterator<Item = (&str, &str, &Value)> {
         self.content.iter().filter_map(|b| match b {
             ContentBlock::ToolCall {
@@ -173,6 +174,9 @@ pub struct TokenUsage {
 pub enum DeltaPhase {
     TextStart,
     TextDelta,
+    /// Matched defensively in the bridge; never constructed by
+    /// current providers but kept for protocol completeness.
+    #[allow(dead_code)]
     TextEnd,
     ThinkingStart,
     ThinkingDelta,
@@ -234,7 +238,9 @@ pub enum LoopMessage {
     Assistant(AssistantMessage),
     ToolResult(ToolResultMessage),
     /// App-defined message that `convertToLlm` filters out before
-    /// the LLM call. See `CustomAgentMessages` in pi types.ts:300.
+    /// the LLM call. Constructed by plugin_hooks when the `plugin`
+    /// feature is active; matched defensively otherwise.
+    #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
     Custom(Value),
 }
 
@@ -243,6 +249,7 @@ impl LoopMessage {
     /// role without matching the variant. Matches pi's literal
     /// roles: `"user"`, `"assistant"`, `"toolResult"`, plus our
     /// `"custom"` for the extension variant.
+    #[allow(dead_code)]
     pub fn role(&self) -> &'static str {
         match self {
             LoopMessage::User(_) => "user",
@@ -292,9 +299,13 @@ pub enum LoopEvent {
     /// `on_update` callback. Port of pi `tool_execution_update`
     /// (types.ts:417).
     ToolExecutionUpdate {
+        #[allow(dead_code)]
         tool_call_id: String,
+        #[allow(dead_code)]
         tool_name: String,
+        #[allow(dead_code)]
         args: Value,
+        #[allow(dead_code)]
         partial_result: super::result::LoopToolResult,
     },
 
@@ -302,8 +313,10 @@ pub enum LoopEvent {
     /// of pi `tool_execution_end` (types.ts:418).
     ToolExecutionEnd {
         tool_call_id: String,
+        #[allow(dead_code)]
         tool_name: String,
         result: super::result::LoopToolResult,
+        #[allow(dead_code)]
         is_error: bool,
     },
 
@@ -328,7 +341,9 @@ pub enum LoopEvent {
     /// completed the turn + the tool results dispatched in this
     /// turn. Port of pi `turn_end` (types.ts:409).
     TurnEnd {
+        #[allow(dead_code)]
         message: AssistantMessage,
+        #[allow(dead_code)]
         tool_results: Vec<ToolResultMessage>,
     },
 }
@@ -337,6 +352,7 @@ impl LoopEvent {
     /// Quick discriminant string for tests (`"message_start"`,
     /// etc.) without going through serde. Lets the phase-1
     /// ported tests assert event sequences cheaply.
+    #[allow(dead_code)]
     pub fn kind(&self) -> &'static str {
         match self {
             LoopEvent::MessageStart { .. } => "message_start",

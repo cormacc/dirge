@@ -42,6 +42,7 @@ pub const HISTORY_FOLD_AGGRESSIVE_TAIL_FRACTION: f64 = 0.1;
 
 /// Skip the fold if the head wouldn't shrink the log by at
 /// least this fraction.
+#[cfg(test)]
 pub const HISTORY_FOLD_MIN_SAVINGS_FRACTION: f64 = 0.3;
 
 /// Above this fraction we exit the turn with a summary instead
@@ -53,11 +54,6 @@ pub const FORCE_SUMMARY_THRESHOLD: f64 = 0.8;
 /// (terminal prior turn, fresh session restore, huge user
 /// paste).
 pub const TURN_START_FOLD_THRESHOLD: f64 = 0.9;
-
-/// Approximate characters-per-token ratio for estimation when
-/// actual token counts aren't available. Used by both run.rs's
-/// turn-start heuristic and Session::estimate_message_tokens.
-pub const CHARS_PER_TOKEN_ESTIMATE: u64 = 4;
 
 // ================================================================
 // Data types — port of context-manager.ts:67-85
@@ -80,7 +76,9 @@ pub enum PostUsageDecisionKind {
 #[derive(Debug, Clone, Copy)]
 pub struct PostUsageDecision {
     pub kind: PostUsageDecisionKind,
+    #[allow(dead_code)]
     pub prompt_tokens: u64,
+    #[allow(dead_code)]
     pub ctx_max: u64,
     pub ratio: f64,
     /// Token budget for the recent tail when kind is Fold.
