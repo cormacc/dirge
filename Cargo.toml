@@ -121,6 +121,7 @@ html2text = "0.17"
 indexmap = "2"
 lsp-types = { version = "0.97", optional = true }
 tree-sitter-elixir = { version = "0.3.5", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
