@@ -19,7 +19,7 @@ use std::path::Path;
 const SCHEMA_VERSION: u32 = 1;
 
 pub struct SessionDb {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl SessionDb {
