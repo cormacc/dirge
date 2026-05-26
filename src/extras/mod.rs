@@ -12,3 +12,4 @@ pub mod acp;
 
 pub mod dirge_paths;
 pub mod memory;
+pub mod session_db;
