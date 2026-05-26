@@ -90,17 +90,11 @@ Be specific and actionable. Future sessions should benefit from what you learned
 /// This is fire-and-forget — it runs in a `tokio::spawn` task and
 /// returns immediately. Failures are logged to stderr and never
 /// block the user.
-pub fn spawn_background_review(
-    agent: AnyAgent,
-    _paths: ProjectPaths,
-    transcript: String,
-) {
+pub fn spawn_background_review(agent: AnyAgent, _paths: ProjectPaths, transcript: String) {
     tokio::spawn(async move {
         // Build a review runner with only memory + skill tools.
-        let review_runner = agent.spawn_review_runner(
-            COMBINED_REVIEW_PROMPT.to_string(),
-            transcript,
-        );
+        let review_runner =
+            agent.spawn_review_runner(COMBINED_REVIEW_PROMPT.to_string(), transcript);
 
         // Drain events. We don't render them — the review runs
         // silently in the background.
