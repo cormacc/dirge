@@ -43,3 +43,9 @@ model-prompts/
 # into the repo.
 .dirge/memory/*.bak*
 *.bak.[0-9]*
+
+# Clojure tooling caches (when working on the Clojure semantic
+# adapter against a real .clj/.cljs file in the repo, clj-kondo
+# and clojure-lsp drop caches in these dirs). Local-only.
+.clj-kondo/.cache/
+.lsp/.cache/
