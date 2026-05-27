@@ -583,7 +583,6 @@ async fn main() -> anyhow::Result<()> {
                             provider_type: ptype,
                             base_url,
                             api_key_env,
-                            allow_insecure: false,
                             // Plugin-registered providers don't expose
                             // a chunk-timeout knob via the
                             // `harness/register-provider` API; they
