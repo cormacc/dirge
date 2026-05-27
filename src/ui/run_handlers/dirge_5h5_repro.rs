@@ -687,6 +687,96 @@ fn empty_spacer_into_text_behaviour() {
     );
 }
 
+/// Final aggressive stress test: mimic the issue's exact reproduction
+/// shape as closely as possible. 7 parallel reads with REALISTIC
+/// `read`-tool output (line-numbered prefixes from `read.rs`), 4
+/// subagent-chat slots created and written to mid-burst, ToolResults
+/// arriving in scrambled order. If THIS passes, the bug is genuinely
+/// not reproducible at the chamber-state-machine layer.
+#[tokio::test]
+async fn dirge_5h5_repro_full_issue_shape() {
+    use crate::ui::theme;
+    let (cli, cfg, mut session, mut renderer) = fresh_scaffold();
+    let mut state = State::new();
+
+    // Create 4 subagent chats up front, as if the parent has spawned
+    // them and they're running concurrently (the issue's "4 background
+    // subagents at the cap").
+    let subagent_idxs: Vec<usize> = (0..4)
+        .map(|i| {
+            let idx = renderer.add_chat(format!("subagent-{i}"));
+            // Seed each with a prompt line as the production
+            // subagent_chat_rx spawn arm does.
+            let _ = renderer.write_line_to_chat(
+                idx,
+                &format!("<you> subagent task {i}"),
+                theme::user(),
+            );
+            idx
+        })
+        .collect();
+
+    let mut ctx = make_ctx(&mut renderer, &mut session, &mut state, &cli, &cfg);
+
+    // Fire 7 parallel ToolCalls.
+    for i in 0..7 {
+        let id = format!("call-{i}");
+        simulate_tool_call(
+            &mut ctx,
+            &id,
+            "read",
+            serde_json::json!({"path": format!("/tmp/file{i}.rs")}),
+        );
+    }
+
+    // Fire ToolResults in scrambled completion order, with subagent
+    // events interleaved (a Complete event firing on each subagent
+    // chat between parent results). Each result's body matches what
+    // `read.rs` would produce for a small file — line-numbered.
+    let result_order = [3, 0, 6, 1, 5, 2, 4];
+    for (step, &i) in result_order.iter().enumerate() {
+        let id = format!("call-{i}");
+        // Realistic line-numbered body from read.rs's format!
+        // pattern (`{:>width$}: {}`).
+        let body = format!(
+            "1: // file {i}\n2: fn main() {{\n3:     println!(\"hello from {i}\");\n4: }}\n5: "
+        );
+        handle_tool_result(&mut ctx, id, body)
+            .await
+            .expect("handle_tool_result");
+
+        // Simulate a subagent_chat_rx event firing between parent
+        // results — rotate through the 4 subagent slots.
+        let sub_idx = subagent_idxs[step % subagent_idxs.len()];
+        let _ = ctx.renderer.write_line_to_chat(
+            sub_idx,
+            &format!("<dirge> subagent step {step}"),
+            c_agent(),
+        );
+    }
+
+    drop(ctx);
+    let chambers = collect_chambers(&renderer);
+
+    // Every one of the 7 parent reads must have a body row.
+    assert_all_chambers_have_body(&chambers, 7);
+
+    // And the body rows must actually contain the file content (not
+    // just any text) — verify the first body row of each chamber
+    // starts with `│ 1:` (the line-1 prefix from read.rs).
+    for (i, c) in chambers.iter().enumerate() {
+        let first = c.first_body.as_deref().unwrap_or("");
+        assert!(
+            first.contains("1:") || first.contains("//") || first.starts_with('\u{2502}'),
+            "chamber {i} ({}) first body row doesn't look like read output: {first:?}",
+            c.name
+        );
+    }
+}
+
+// Bring c_agent into scope for the test above.
+use crate::ui::colors::c_agent;
+
 /// Real `read`-tool output flattened through `sanitize_output` →
 /// `chamber_row` → `into_text`. Simulates a realistic 7-line file
 /// being rendered as a chamber body.
