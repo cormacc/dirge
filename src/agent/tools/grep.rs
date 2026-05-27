@@ -47,6 +47,15 @@ impl GrepTool {
                 '{' => re.push_str("(?:"),
                 '}' => re.push(')'),
                 ',' => re.push('|'),
+                // TOOL-2: escape regex metacharacters in the fallthrough
+                // so an `include` glob like `*.c++` doesn't compile to
+                // `.*\.c++` (which the regex engine interprets as a
+                // possessive `+` quantifier) and `[abc].rs` doesn't
+                // become a regex character class.
+                c if "+()[]^$|\\".contains(c) => {
+                    re.push('\\');
+                    re.push(c);
+                }
                 _ => re.push(c),
             }
         }

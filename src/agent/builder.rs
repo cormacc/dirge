@@ -455,6 +455,22 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                     .filter(|t| {
                         let name = t.definition.name.as_ref();
                         if builtin_names.contains(&name) {
+                            // EXT-11: emit BOTH a tracing warn (for
+                            // structured-log consumers and the in-UI
+                            // notification pipeline) AND an eprintln
+                            // (for users running without a tracing
+                            // subscriber that surfaces warns). The
+                            // MCP version is dropped rather than
+                            // shadowing the built-in — rig's builder
+                            // would otherwise prefer the last-added
+                            // tool, letting an arbitrary MCP server
+                            // override core dirge tools.
+                            tracing::warn!(
+                                target: "dirge::mcp",
+                                server = %t.server_name,
+                                tool = %name,
+                                "MCP tool name collides with a dirge built-in; skipping MCP version",
+                            );
                             eprintln!(
                                 "warning: MCP server '{}' exports tool '{}' which collides with a dirge built-in; skipping MCP version",
                                 t.server_name, name,

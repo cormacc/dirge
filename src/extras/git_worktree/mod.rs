@@ -77,11 +77,60 @@ pub fn default_branch(repo_path: &Path) -> Option<String> {
     None
 }
 
+/// Reject branch names that would be unsafe or ambiguous as a `git
+/// worktree add -b <name>` argument. EXT-8: pre-flight check against
+/// the obviously-hostile shapes before invoking git; combined with the
+/// `--` argv separator below, this defangs both flag-injection
+/// (`--exec=…`) and the assorted git ref-name traversal / metachar
+/// foot-guns (`..`, `~`, `:`, `HEAD`, control bytes).
+fn validate_branch_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("branch name must not be empty".to_string());
+    }
+    if name.starts_with('-') {
+        // Leading `-` would be parsed by git as a flag even though
+        // it sits in the positional slot — covered also by `--` below,
+        // but reject early for a clearer error.
+        return Err(format!(
+            "branch name {name:?} must not start with '-' (looks like a git flag)"
+        ));
+    }
+    if name == "HEAD" || name == "@" {
+        return Err(format!("branch name {name:?} is a reserved git ref"));
+    }
+    if name.contains("..") {
+        return Err(format!(
+            "branch name {name:?} must not contain '..' (git ref-name rule)"
+        ));
+    }
+    for bad in ['~', ':', '^', '?', '*', '['] {
+        if name.contains(bad) {
+            return Err(format!(
+                "branch name {name:?} must not contain '{bad}' (git ref-name rule)"
+            ));
+        }
+    }
+    if name
+        .chars()
+        .any(|c| c == '\0' || (c.is_control() && c != '\t'))
+    {
+        return Err(format!(
+            "branch name {name:?} must not contain null bytes or control characters"
+        ));
+    }
+    Ok(())
+}
+
 pub fn create(name: &str) -> Result<(PathBuf, WorktreeInfo), String> {
+    validate_branch_name(name)?;
     let target = format!("../{}", name);
 
+    // EXT-8: insert `--` before the positional args so a maliciously-
+    // crafted but technically-valid name can't be re-interpreted as
+    // a flag by git's option parser. `validate_branch_name` already
+    // rejects the obvious shapes; `--` is belt-and-suspenders.
     let output = Command::new("git")
-        .args(["worktree", "add", "-b", name, &target])
+        .args(["worktree", "add", "-b", name, "--", &target])
         .output()
         .map_err(|e| format!("failed to run git: {}", e))?;
 

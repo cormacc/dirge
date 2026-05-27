@@ -12,7 +12,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Claude-compatible skills**: discover skills from `.claude/skills/`, `.opencode/skills/`, `.dirge/skills/` directories. Agent can call the `skill` tool to load instructions on demand
 - **Bash permissions** (tree-sitter): parses shell commands to split `&&`/`;`/`|` into individual segments, detects command substitution and complex constructs
 - **Permission system**: four configurable modes with per-tool patterns, session allowlists, and external directory policies
-- **Session management**: save/load/resume sessions, auto-compaction to stay within context windows
+- **Session management**: save/load/resume sessions, auto-pruning of large tool results to stay within context windows (current implementation; an LLM-summarization compaction path exists in `src/agent/compression.rs` but is not yet wired into the runtime — `/compress` triggers tool-output pruning only)
 - **Terminal UI**: crossterm-based, markdown rendering, soft-wrapping input box, mouse selection/copy, scrollback, reasoning visibility toggle
 - **Info panel**: optional right-hand sidebar showing cwd, MCP/LSP server status, pending todos, and recently-modified files. Auto-shown at ≥100 cols; toggle via `/panel`
 - **Mid-execution interjection**: type while the agent is running to queue a follow-up message — the runner stops at the next tool-result boundary so it's picked up promptly instead of waiting for the whole multi-turn run. `Ctrl+X` drops queued messages, `Ctrl+C` cancels both the run and the queue

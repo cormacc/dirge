@@ -75,6 +75,38 @@ fn is_transport_failure(err: &ServiceError) -> bool {
     )
 }
 
+/// MCP tool permission trust model — read before assuming an MCP
+/// tool obeys the same rules as a built-in:
+///
+/// All MCP tool calls route through `check_perm` with the umbrella
+/// tool name `"mcp_tool"` and a perm key shaped
+/// `mcp_tool:<server>:<name>`. They do NOT alias to dirge built-ins
+/// — an MCP server exporting `edit_file` / `write` / `bash` is
+/// gated by `mcp_tool` rules, NOT by the user's `edit:` / `write:` /
+/// `bash:` rules.
+///
+/// Concretely, if the user configures:
+///
+///   "permission": {
+///     "edit":     { "/etc/**": "deny" },
+///     "mcp_tool": { "*":       "allow" }
+///   }
+///
+/// …a built-in `edit` of `/etc/passwd` is denied, but an MCP-exported
+/// `edit_file` call against `/etc/passwd` runs unprompted. To gate
+/// MCP-exported edits, pin the qualified form:
+///
+///   "permission": {
+///     "mcp_tool": {
+///       "mcp_tool:fs:edit_file": "ask"
+///     }
+///   }
+///
+/// Prompt frontmatter `deny_tools` IS cross-checked against the
+/// concrete MCP tool name (PERM-7 — handled inside
+/// `PermissionChecker::check` plus the explicit `any_prompt_denied`
+/// probe below), so plan-mode `deny_tools: [edit]` does block an
+/// MCP-exported `edit`. Built-in tool *rule tables* don't alias.
 impl ToolDyn for McpTool {
     fn name(&self) -> String {
         self.definition.name.to_string()

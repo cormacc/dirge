@@ -781,6 +781,15 @@ impl Session {
         // everything else so a fresh session doesn't inherit
         // phantom branch records from the prior one.
         self.branch_summaries.clear();
+        // SESS-10: clear the file-conflict mtime and active prompt
+        // name. A reset session has no on-disk file yet (the new id
+        // doesn't exist), so a stale `loaded_mtime` from the prior
+        // session would confuse the concurrent-writer check on the
+        // first save. `current_prompt_name` is session-scoped — the
+        // prompt the user was running before reset shouldn't carry
+        // over implicitly.
+        self.loaded_mtime = None;
+        self.current_prompt_name = None;
         // Note: model/provider/context_window/working_dir preserved
         // so the host can keep the same agent runtime.
     }

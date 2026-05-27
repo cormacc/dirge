@@ -382,6 +382,24 @@ impl PermissionChecker {
                 "Tool {tool:?} is denied by the active prompt's `deny_tools` frontmatter. Switch with `/prompt <other>` to use it."
             ));
         }
+        // PERM-7: MCP tools route through `check_perm("mcp_tool", input)`
+        // with input shaped `mcp_tool:<server>:<name>`. The umbrella
+        // tool name `"mcp_tool"` won't match a deny-list entry like
+        // `edit` even if the MCP server exports an `edit` tool. Probe
+        // the concrete tool name (the part after the second `:`) so
+        // a prompt's `deny_tools: [edit]` denies an MCP-exported
+        // `edit` too. Centralized here so any caller (not just the
+        // McpTool wrapper) gets the defense; the wrapper's explicit
+        // `any_prompt_denied` probe becomes redundant but harmless.
+        if tool == "mcp_tool"
+            && let Some(rest) = input.strip_prefix("mcp_tool:")
+            && let Some((_server, concrete)) = rest.split_once(':')
+            && self.is_prompt_denied(concrete)
+        {
+            return CheckResult::Denied(format!(
+                "MCP tool {concrete:?} is denied by the active prompt's `deny_tools` frontmatter. Switch with `/prompt <other>` to use it."
+            ));
+        }
         if self.mode == SecurityMode::Yolo {
             return CheckResult::Allowed;
         }
@@ -757,15 +775,25 @@ impl PermissionChecker {
             return false;
         }
         let cwd = Path::new(&self.working_dir);
-        // Canonical cwd is precomputed (see `working_dir_canonical`).
-        // Comparing against BOTH the canonical and literal forms
-        // handles symlinked roots like macOS's `/tmp → /private/tmp`:
-        // `resolved` is canonical (`/private/tmp/...`) but `cwd`
-        // may still be the literal `/tmp` form. Without both checks
-        // every in-tree access in such a setup would classify as
-        // external.
-        let canonical_cwd = Path::new(&self.working_dir_canonical);
-        !p.starts_with(canonical_cwd) && !p.starts_with(cwd)
+        // PERM-3: re-canonicalize at check time so a symlink
+        // rewrite (or `working_dir_canonical` going stale for
+        // any other reason) doesn't misclassify in-tree paths
+        // as external (or vice versa). The cached
+        // `working_dir_canonical` is kept as a fallback for
+        // when the on-disk cwd has been removed/replaced.
+        let fresh_canonical = canonicalize_for_cache(&self.working_dir);
+        // Comparing against the fresh canonical, the cached
+        // canonical, AND the literal form handles symlinked
+        // roots like macOS's `/tmp → /private/tmp`: `resolved`
+        // is canonical (`/private/tmp/...`) but `cwd` may still
+        // be the literal `/tmp` form. Without all three checks
+        // every in-tree access in such a setup would classify
+        // as external.
+        let canonical_cwd_cached = Path::new(&self.working_dir_canonical);
+        let canonical_cwd_fresh = Path::new(&fresh_canonical);
+        !p.starts_with(canonical_cwd_fresh)
+            && !p.starts_with(canonical_cwd_cached)
+            && !p.starts_with(cwd)
     }
 
     fn match_ext_dir(&self, path_str: &str) -> Option<Action> {

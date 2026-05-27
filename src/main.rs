@@ -590,6 +590,12 @@ async fn main() -> anyhow::Result<()> {
                             // inherit the top-level default
                             // (`stream_chunk_timeout_secs` or 300s).
                             stream_chunk_timeout_secs: None,
+                            // PROV-1: plugin-registered providers
+                            // can't opt into HTTP. If a plugin
+                            // declares a non-https base_url the
+                            // validator in `install_plugin_providers`
+                            // will reject it.
+                            allow_insecure: false,
                         },
                     )
                 })

@@ -44,11 +44,33 @@ pub fn discover_skills(cwd: &Path) -> Vec<Skill> {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_dir() {
+                // UI-5: refuse to load skills whose directory or
+                // SKILL.md is a symlink. Symlinks would let a
+                // repo plant `.dirge/skills/innocent -> /etc/...`
+                // and silently load whatever the link target
+                // contains. `std::fs::metadata` follows links;
+                // `symlink_metadata` does not.
+                let lmeta = match std::fs::symlink_metadata(&path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if lmeta.file_type().is_symlink() {
+                    eprintln!("warning: skipping symlinked skill dir {:?}", path);
+                    continue;
+                }
+                if !lmeta.is_dir() {
                     continue;
                 }
                 let skill_md = path.join("SKILL.md");
-                if !skill_md.is_file() {
+                let skill_lmeta = match std::fs::symlink_metadata(&skill_md) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if skill_lmeta.file_type().is_symlink() {
+                    eprintln!("warning: skipping symlinked SKILL.md at {:?}", skill_md);
+                    continue;
+                }
+                if !skill_lmeta.is_file() {
                     continue;
                 }
                 // Cap skill content at 1 MB. A skill is meant to be a

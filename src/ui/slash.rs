@@ -56,31 +56,50 @@ fn align_cut_to_user_boundary(
     i
 }
 
-pub fn undo_last(session: &mut Session) -> usize {
+/// Outcome of `undo_last`. `removed` is the number of messages popped;
+/// `had_tool_calls` is set when at least one of the popped messages
+/// had tool calls attached — the caller should surface a warning
+/// because tool side effects (file writes, bash, MCP calls) are NOT
+/// reverted by undo.
+#[derive(Debug, Default)]
+pub struct UndoOutcome {
+    pub removed: usize,
+    pub had_tool_calls: bool,
+}
+
+pub fn undo_last(session: &mut Session) -> UndoOutcome {
     let len = session.messages.len();
     if len == 0 {
-        return 0;
+        return UndoOutcome::default();
     }
+    let mut outcome = UndoOutcome::default();
+    let pop = |session: &mut Session, outcome: &mut UndoOutcome| {
+        if let Some(last) = session.messages.last()
+            && !last.tool_calls.is_empty()
+        {
+            outcome.had_tool_calls = true;
+        }
+        session.pop_last_message();
+        outcome.removed += 1;
+    };
     // Route through `pop_last_message` so the tree + message_store
     // stay in sync — P4c made direct .messages.pop() incorrect for
     // branched sessions.
     if session.messages[len - 1].role == MessageRole::Assistant {
-        session.pop_last_message();
+        pop(session, &mut outcome);
         if session
             .messages
             .last()
             .is_some_and(|m| m.role == MessageRole::User)
         {
-            session.pop_last_message();
-            return 2;
+            pop(session, &mut outcome);
         }
-        return 1;
+        return outcome;
     }
     if session.messages[len - 1].role == MessageRole::User {
-        session.pop_last_message();
-        return 1;
+        pop(session, &mut outcome);
     }
-    0
+    outcome
 }
 
 /// Result of an attempted compression. `Compacted` means messages
@@ -987,9 +1006,32 @@ pub async fn handle_slash(
                 return Ok(());
             }
             let name = parts[1].trim();
-            if name.is_empty() || name.contains(' ') || name.contains('/') {
+            // EXT-8: fail fast on the obviously-broken / hostile
+            // shapes BEFORE shelling out to git. `git_worktree::create`
+            // performs the canonical check (and rejects more shapes —
+            // reserved refs, `..`, control bytes, etc.); this inline
+            // probe just gives the user an immediate error for the
+            // common typos without paying for a subprocess.
+            let invalid = name.is_empty()
+                || name.contains(' ')
+                || name.contains('/')
+                || name.starts_with('-')
+                || name.contains("..")
+                || name == "HEAD"
+                || name == "@"
+                || name.chars().any(|c| {
+                    c == '\0'
+                        || c == '~'
+                        || c == ':'
+                        || c == '^'
+                        || c == '?'
+                        || c == '*'
+                        || c == '['
+                        || (c.is_control() && c != '\t')
+                });
+            if invalid {
                 renderer.write_line(
-                    "invalid name: use a single word without spaces or slashes",
+                    "invalid name: use a single word without spaces, slashes, leading '-', '..', or git ref metacharacters (~ : ^ ? * [) — and not 'HEAD' or '@'",
                     c_error(),
                 )?;
                 return Ok(());
@@ -1083,6 +1125,45 @@ pub async fn handle_slash(
                     return Ok(());
                 }
             };
+            // EXT-9: refuse to exit a dirty worktree without an
+            // explicit `--force`. Otherwise pending edits / untracked
+            // files get silently stranded in the worktree directory
+            // while the user is dropped back into the main repo and
+            // assumes the work followed them. `git status --porcelain`
+            // emits a non-empty line per dirty path; any output =
+            // refuse.
+            let force = parts.iter().skip(1).any(|p| *p == "--force" || *p == "-f");
+            if !force {
+                let status = std::process::Command::new("git")
+                    .args(["status", "--porcelain"])
+                    .output();
+                match status {
+                    Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+                        let dirty = String::from_utf8_lossy(&out.stdout);
+                        let line_count = dirty.lines().count();
+                        renderer.write_line(
+                            &format!(
+                                "worktree is dirty ({} uncommitted change{}); refusing to exit. Commit/stash first, or run `/wt-exit --force` to leave it stranded.",
+                                line_count,
+                                if line_count == 1 { "" } else { "s" },
+                            ),
+                            c_error(),
+                        )?;
+                        return Ok(());
+                    }
+                    Ok(_) => {} // clean tree
+                    Err(e) => {
+                        renderer.write_line(
+                            &format!(
+                                "could not run `git status` to check worktree state ({}); refusing to exit. Pass `--force` to override.",
+                                e
+                            ),
+                            c_error(),
+                        )?;
+                        return Ok(());
+                    }
+                }
+            }
             let main_path = info.main_repo_path.display();
             renderer.write_line(
                 &format!("returning to main repo at {}", main_path),
@@ -1402,10 +1483,25 @@ pub async fn handle_slash(
             }
         }
         "/undo" => {
-            let removed = undo_last(session);
-            if removed > 0 {
+            let outcome = undo_last(session);
+            if outcome.removed > 0 {
                 render_session(renderer, session, cli, cfg, context)?;
-                renderer.write_line(&format!("removed {} message(s)", removed), c_agent())?;
+                renderer.write_line(
+                    &format!("removed {} message(s)", outcome.removed),
+                    c_agent(),
+                )?;
+                // SESS-13: rewinding the transcript does NOT undo
+                // any file writes, bash commands, MCP calls, or
+                // other side effects executed during the popped
+                // turn — only the LLM's view of history. Surface
+                // this so the user doesn't assume the on-disk
+                // state was reverted.
+                if outcome.had_tool_calls {
+                    renderer.write_line(
+                        "warning: tool side effects (file writes, bash, MCP) were NOT reverted",
+                        c_error(),
+                    )?;
+                }
             } else {
                 renderer.write_line("nothing to undo", c_agent())?;
             }

@@ -1620,6 +1620,8 @@ mod tests {
                 api_key_env: Some("PLUGIN_TEST_KEY".to_string()),
                 allow_insecure: true,
                 stream_chunk_timeout_secs: None,
+                // test URL is http (not https) — must opt into insecure
+                allow_insecure: true,
             },
         );
         // Best-effort install — OnceLock may already be set from
@@ -1659,6 +1661,8 @@ mod tests {
                 api_key_env: None,
                 allow_insecure: true,
                 stream_chunk_timeout_secs: None,
+                // test URL is http — opt into insecure
+                allow_insecure: true,
             },
         );
         // Even if the plugin global also has "shadowed", config wins

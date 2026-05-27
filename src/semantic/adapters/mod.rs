@@ -104,6 +104,14 @@ impl AdapterRegistry {
     /// outside of comments/strings, so a single hit is a strong
     /// signal. Caps the scan at 32 KiB so a huge header doesn't slow
     /// the registry call.
+    ///
+    /// EXT-1: pre-strip C/C++ comments and string literals before
+    /// the substring check so a benign C header with a comment
+    /// mentioning "class" or a string containing "::" doesn't get
+    /// misclassified as C++. The stripping is single-pass and
+    /// conservative — it errs toward keeping content (so we may
+    /// over-classify, never under) but consumes the obvious
+    /// comment/string forms that cause false positives in practice.
     fn looks_like_cpp_header(&self, src: &str) -> bool {
         const SNIFF_BYTES: usize = 32 * 1024;
         let head = if src.len() > SNIFF_BYTES {
@@ -116,11 +124,12 @@ impl AdapterRegistry {
         } else {
             src
         };
-        head.contains("class ")
-            || head.contains("namespace ")
-            || head.contains("template<")
-            || head.contains("template <")
-            || head.contains("::")
+        let cleaned = strip_c_comments_and_strings(head);
+        cleaned.contains("class ")
+            || cleaned.contains("namespace ")
+            || cleaned.contains("template<")
+            || cleaned.contains("template <")
+            || cleaned.contains("::")
     }
 
     pub fn all_extensions(&self) -> Vec<String> {
@@ -132,5 +141,86 @@ impl AdapterRegistry {
                     .map(|e| e.trim_start_matches('.').to_string())
             })
             .collect()
+    }
+}
+
+/// Strip C/C++ block comments (`/* … */`), line comments (`// … \n`),
+/// and double-quoted string literals from `src`. Used by the C++
+/// header sniff so tokens inside comments/strings don't false-trigger
+/// classification. Single-pass, conservative: doesn't try to handle
+/// raw strings, character literals, or nested comment edge cases —
+/// those can cause us to KEEP slightly more content than necessary
+/// (a tolerable failure mode), never to strip valid code.
+fn strip_c_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // /* … */ block comment
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            out.push(' ');
+            continue;
+        }
+        // // … line comment
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            out.push(' ');
+            continue;
+        }
+        // "..." string literal (handles \" escape)
+        if b == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            i = (i + 1).min(bytes.len());
+            out.push(' ');
+            continue;
+        }
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod sniff_tests {
+    use super::strip_c_comments_and_strings;
+
+    #[test]
+    fn strip_block_comment() {
+        let stripped = strip_c_comments_and_strings("int x; /* class Foo */ int y;");
+        assert!(!stripped.contains("class"));
+    }
+
+    #[test]
+    fn strip_line_comment() {
+        let stripped = strip_c_comments_and_strings("int x; // namespace foo\nint y;");
+        assert!(!stripped.contains("namespace"));
+    }
+
+    #[test]
+    fn strip_string_literal() {
+        let stripped = strip_c_comments_and_strings(r#"printf("a::b\n");"#);
+        assert!(!stripped.contains("::"));
+    }
+
+    #[test]
+    fn keeps_real_cpp_class() {
+        let stripped = strip_c_comments_and_strings("class Foo { int x; };");
+        assert!(stripped.contains("class "));
     }
 }

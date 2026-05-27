@@ -242,6 +242,33 @@ impl Tool for ApplyPatchTool {
             // entirely). The previous in-tool PLAN.md path gate is
             // gone.
 
+            // TOOL-3: require absolute paths up front, matching the
+            // sibling tools (`read`, `write`, `edit`). The permission
+            // checker would resolve a relative path against cwd, but
+            // the agent-facing schema asks for absolute paths and
+            // silently accepting `./foo` masks bugs / makes intent
+            // ambiguous when the agent's mental model is "absolute".
+            let op_path: &str = match op {
+                PatchOp::Create { path, .. }
+                | PatchOp::Update { path, .. }
+                | PatchOp::Delete { path }
+                | PatchOp::Rename { path, .. } => path,
+            };
+            if !std::path::Path::new(op_path).is_absolute() {
+                return Err(ToolError::Msg(format!(
+                    "apply_patch requires an absolute path, got: {}",
+                    op_path
+                )));
+            }
+            if let PatchOp::Rename { new_path, .. } = op
+                && !std::path::Path::new(new_path).is_absolute()
+            {
+                return Err(ToolError::Msg(format!(
+                    "apply_patch rename requires an absolute new_path, got: {}",
+                    new_path
+                )));
+            }
+
             // C1 (audit fix): resolve the path THROUGH the permission
             // checker so symlinks are pinned to their canonical target.
             // The check returns the canonical form; subsequent

@@ -709,6 +709,14 @@ mod tests {
 }
 
 pub fn find_sessions_by_prefix(prefix: &str) -> anyhow::Result<Vec<Session>> {
+    // SESS-5: `stem.starts_with("")` matches every session file, so
+    // `/sessions ` or `/sessions delete ` (trailing space) would
+    // enumerate or operate on ALL sessions instead of a prefix
+    // match. Reject empty prefix so callers must supply at least
+    // one character.
+    if prefix.is_empty() {
+        anyhow::bail!("session prefix must not be empty");
+    }
     let dir = session_dir();
     if !dir.exists() {
         return Ok(Vec::new());

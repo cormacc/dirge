@@ -200,12 +200,31 @@ pub(crate) fn retry_after_from_error_msg(msg: &str) -> Option<Duration> {
 /// recognized date form (the numeric forms are handled by
 /// `parse_after_label` above).
 fn parse_http_date_retry_after(msg: &str) -> Option<Duration> {
-    // Locate `retry-after` (case-insensitive) the same way
-    // `parse_after_label` does, then read the value after the colon
-    // up to the next newline.
+    // PROV-10: case-insensitive byte-window scan rather than
+    // lowercasing the whole message and indexing back into the
+    // original. `to_ascii_lowercase` on the message preserves byte
+    // length only for ASCII inputs; a unicode-bearing message could
+    // shift offsets and panic on `&msg[after..]`. Mirror the pattern
+    // used in `parse_after_label`.
     let label = "retry-after";
-    let lower = msg.to_ascii_lowercase();
-    let idx = lower.find(label)?;
+    let label_bytes = label.as_bytes();
+    let msg_bytes = msg.as_bytes();
+    if msg_bytes.len() < label_bytes.len() {
+        return None;
+    }
+    let mut found = None;
+    for i in 0..=msg_bytes.len() - label_bytes.len() {
+        let window = &msg_bytes[i..i + label_bytes.len()];
+        if window
+            .iter()
+            .zip(label_bytes.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            found = Some(i);
+            break;
+        }
+    }
+    let idx = found?;
     let after = idx + label.len();
     if !msg.is_char_boundary(after) {
         return None;
@@ -280,11 +299,32 @@ pub fn classify_error(msg: &str) -> ErrorKind {
         return ErrorKind::Auth;
     }
 
+    // PROV-8: OpenAI's `insufficient_quota` and the broader
+    // billing-exhausted signal come through wrapped in a 429 but
+    // are permanent failures (the user's billing account is
+    // empty/suspended). Without this check we'd burn the full retry
+    // budget on a request that will never succeed. Route to Auth so
+    // the policy treats it as non-retryable.
+    if lower.contains("insufficient_quota")
+        || lower.contains("billing_not_active")
+        || lower.contains("billing_hard_limit_reached")
+    {
+        return ErrorKind::Auth;
+    }
+
     if lower.contains("rate limit") || lower.contains("too many requests") {
         return ErrorKind::RateLimit;
     }
 
     if lower.contains(" 429 ") || lower.contains("error 429") || lower.starts_with("429 ") {
+        return ErrorKind::RateLimit;
+    }
+
+    // PROV-7: Gemini emits 429s with body
+    // `{"error":{"status":"RESOURCE_EXHAUSTED",…}}` that often
+    // arrive stringified without the literal " 429 " or "rate
+    // limit" wording. Treat as transient so the backoff loop runs.
+    if lower.contains("resource_exhausted") || lower.contains("resource has been exhausted") {
         return ErrorKind::RateLimit;
     }
 
@@ -328,6 +368,13 @@ pub fn classify_error(msg: &str) -> ErrorKind {
         || lower.contains("input token count exceeds")
         || lower.contains("tokens exceed")
         || lower.contains("exceeds the model's context")
+        // PROV-6: Anthropic `max_tokens is too large` (input + max_tokens > window);
+        // Cohere/Mistral-via-OpenRouter `too many tokens`; DeepSeek
+        // `Range of input length`; OpenRouter `messages.length too large`.
+        || lower.contains("max_tokens is too large")
+        || lower.contains("too many tokens")
+        || lower.contains("range of input length")
+        || lower.contains("messages.length too large")
     {
         return ErrorKind::ContextLength;
     }
