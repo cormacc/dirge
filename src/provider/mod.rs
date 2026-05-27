@@ -788,6 +788,19 @@ pub struct AnyAgent {
     /// `with_max_turns`. Forwarded to `LoopSpawnConfig.max_turns`
     /// at spawn time. `None` = unlimited (legacy).
     max_turns: Option<usize>,
+    /// dirge-z73i: alternate stream_fn for the background-review
+    /// path. Built at `build_agent` time when `ConfigRole::Review`
+    /// resolves to a different provider than `ConfigRole::Default`.
+    /// `None` falls back to the main agent's stream_fn (legacy
+    /// behavior; matches the original `spawn_review_runner`).
+    review_stream_fn: Option<crate::agent::agent_loop::StreamFn>,
+    /// dirge-z73i: provider alias for the review route, surfaced in
+    /// the review runner's `LoopConfig.provider_name` so telemetry
+    /// records the right backend.
+    review_provider_name: Option<String>,
+    /// dirge-z73i: model identifier for the review route, surfaced
+    /// in the review runner's `LoopConfig.model_name`.
+    review_model_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -824,7 +837,27 @@ impl AnyAgent {
             escalation_provider_name: None,
             context_depth_reminder_threshold: None,
             max_turns: None,
+            review_stream_fn: None,
+            review_provider_name: None,
+            review_model_name: None,
         }
+    }
+
+    /// dirge-z73i: install a dedicated stream_fn for the
+    /// background-review path. Called from `build_agent` only when
+    /// `ConfigRole::Review` resolves to a different alias than
+    /// `ConfigRole::Default`. `spawn_review_runner` picks this up
+    /// and routes review work through the alternate provider/model.
+    pub fn with_review_route(
+        mut self,
+        stream_fn: crate::agent::agent_loop::StreamFn,
+        provider_name: String,
+        model_name: String,
+    ) -> Self {
+        self.review_stream_fn = Some(stream_fn);
+        self.review_provider_name = Some(provider_name);
+        self.review_model_name = Some(model_name);
+        self
     }
 
     /// dirge-nqr: install the per-run assistant-turn cap. `None`
@@ -1242,7 +1275,31 @@ impl AnyAgent {
             .map(|t| loop_tool_to_rig_definition(t.as_ref()))
             .collect();
 
-        let inner_stream_fn = self.build_stream_fn(tool_defs);
+        // dirge-z73i: prefer the explicit review_stream_fn when the
+        // user configured `review_provider` to point at a different
+        // alias than `provider`. Falls back to the main agent's
+        // stream_fn so unconfigured sessions keep the legacy behavior
+        // byte-for-byte.
+        let (inner_stream_fn, provider_name_for_review, model_name_for_review) =
+            if let Some(rfn) = self.review_stream_fn.clone() {
+                (
+                    rfn,
+                    self.review_provider_name
+                        .clone()
+                        .unwrap_or_else(|| self.provider_name().to_string()),
+                    self.review_model_name.clone(),
+                )
+            } else {
+                (
+                    self.build_stream_fn(tool_defs),
+                    self.provider_name().to_string(),
+                    if self.model_name.is_empty() {
+                        None
+                    } else {
+                        Some(self.model_name.clone())
+                    },
+                )
+            };
         let stream_fn = retrying_stream_fn(inner_stream_fn, RecoveryPolicy::default());
 
         let full_prompt = format!(
@@ -1253,12 +1310,8 @@ impl AnyAgent {
         let mut cfg = LoopSpawnConfig::minimal(stream_fn, full_prompt);
         cfg.system_prompt = self.preamble.clone();
         cfg.tools = review_tools;
-        cfg.provider_name = Some(self.provider_name().to_string());
-        cfg.model_name = if self.model_name.is_empty() {
-            None
-        } else {
-            Some(self.model_name.clone())
-        };
+        cfg.provider_name = Some(provider_name_for_review);
+        cfg.model_name = model_name_for_review;
 
         let loop_runner = spawn_loop_runner(cfg);
         (loop_runner.into_agent_runner(), review_cache)
@@ -1607,6 +1660,83 @@ pub async fn build_agent(
         agent = agent.with_context_depth_reminder(threshold);
     }
 
+    // dirge-z73i — background-review route wiring.
+    //
+    // When the user has configured `review_provider` AND it
+    // resolves to a different (alias, entry) than `ConfigRole::Default`,
+    // build a review-specific stream_fn so `spawn_review_runner` runs
+    // through the configured cheaper / smarter model.
+    //
+    // Same equality short-circuit as escalation: if the resolved
+    // alias equals the default, skip the duplicate client (the
+    // fallback inside `spawn_review_runner_with_cache` produces an
+    // identical request).
+    if cfg.review_provider.is_some() {
+        let default_role = cfg.resolve_role(crate::config::ConfigRole::Default);
+        let review_role = cfg.resolve_role(crate::config::ConfigRole::Review);
+        match (default_role, review_role) {
+            (Some((default_alias, _)), Some((review_alias, review_entry))) => {
+                if default_alias.eq_ignore_ascii_case(&review_alias) {
+                    tracing::debug!(
+                        target: "dirge::provider",
+                        alias = %review_alias,
+                        "review provider equals default; skipping duplicate client construction",
+                    );
+                } else {
+                    match build_review_stream_fn(
+                        &review_alias,
+                        &review_entry,
+                        &cfg.providers_map(),
+                        chunk_timeout,
+                        &agent.loop_tools,
+                    ) {
+                        Ok((stream_fn, model_name)) => {
+                            agent = agent.with_review_route(
+                                stream_fn,
+                                review_alias.clone(),
+                                model_name,
+                            );
+                            tracing::info!(
+                                target: "dirge::provider",
+                                alias = %review_alias,
+                                "review-provider route wired",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                target: "dirge::provider",
+                                alias = %review_alias,
+                                "failed to build review stream_fn: {e}",
+                            );
+                            eprintln!(
+                                "error: failed to build review stream_fn for '{}': {}",
+                                review_alias, e
+                            );
+                        }
+                    }
+                }
+            }
+            (_, None) => {
+                let alias = cfg.review_provider.as_deref().unwrap_or("(unset)");
+                tracing::warn!(
+                    target: "dirge::provider",
+                    alias = %alias,
+                    "review_provider configured but alias does not resolve to a known provider",
+                );
+                eprintln!(
+                    "error: review_provider '{}' is configured but does not match any entry \
+                     in `providers` or any built-in. Either add it under `providers` or \
+                     remove the `review_provider` setting.",
+                    alias
+                );
+            }
+            (None, _) => {
+                // Default not resolvable — caller's "no provider"
+                // error path handles it.
+            }
+        }
+    }
+
     // dirge-nqr — per-run assistant-turn cap. CLI `--max-agent-turns`
     // > config `max_agent_turns` > default 100 (matches the existing
     // `cli::resolve_max_agent_turns` precedence). Always set: the
@@ -1632,8 +1762,6 @@ fn build_escalation_stream_fn(
 ) -> anyhow::Result<crate::agent::agent_loop::StreamFn> {
     use crate::agent::agent_loop::loop_tool_to_rig_definition;
     let client = create_client(alias, None, providers)?;
-    // Resolve the model: prefer the per-entry `model`; fall back to
-    // the provider's default for the resolved provider kind.
     let model_name = entry
         .model
         .clone()
@@ -1644,6 +1772,43 @@ fn build_escalation_stream_fn(
         .map(|t| loop_tool_to_rig_definition(t.as_ref()))
         .collect();
     Ok(model.build_stream_fn(tool_defs, chunk_timeout, Some(alias.to_string())))
+}
+
+/// dirge-z73i: build a stream_fn for the background-review path,
+/// routed through `ConfigRole::Review`. Only the memory + skill tools
+/// are baked into the request — the review fork's `loop_tools` is
+/// filtered to the same set in `spawn_review_runner_with_cache`,
+/// so the model sees a tool catalog that matches what the dispatcher
+/// will actually accept. Returns `(stream_fn, model_name)` so the
+/// caller can stash the model identifier alongside the stream_fn for
+/// telemetry (`LoopConfig.model_name`).
+fn build_review_stream_fn(
+    alias: &str,
+    entry: &ProviderEntry,
+    providers: &HashMap<String, ProviderEntry>,
+    chunk_timeout: std::time::Duration,
+    loop_tools: &[std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>],
+) -> anyhow::Result<(crate::agent::agent_loop::StreamFn, String)> {
+    use crate::agent::agent_loop::loop_tool_to_rig_definition;
+    let client = create_client(alias, None, providers)?;
+    let model_name = entry
+        .model
+        .clone()
+        .unwrap_or_else(|| default_model_for(alias).to_string());
+    let model = client.completion_model(model_name.clone());
+    // Review path uses ONLY memory + skill — match what
+    // `spawn_review_runner_with_cache` puts in `cfg.tools` so
+    // the request body and the dispatcher agree.
+    let tool_defs: Vec<rig::completion::ToolDefinition> = loop_tools
+        .iter()
+        .filter(|t| {
+            let n = t.name();
+            n == "memory" || n == "skill"
+        })
+        .map(|t| loop_tool_to_rig_definition(t.as_ref()))
+        .collect();
+    let stream_fn = model.build_stream_fn(tool_defs, chunk_timeout, Some(alias.to_string()));
+    Ok((stream_fn, model_name))
 }
 
 #[cfg(test)]

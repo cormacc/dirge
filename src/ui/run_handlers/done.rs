@@ -57,7 +57,13 @@ pub(crate) struct WorktreeBits<'a> {
     pub return_path: &'a mut Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
+// False positive for `await_holding_lock`: the plugin-manager guard
+// IS held during dispatch calls (sync) but is explicitly `drop(mgr)`-ed
+// at line 209 BEFORE the `build_agent(...).await` at line 236, and
+// re-acquired in a new scope at line 263. Clippy can't trace the
+// `drop()` so it flags the outer `let mut mgr` as held across the
+// await even though it isn't.
+#[allow(clippy::too_many_arguments, clippy::await_holding_lock)]
 pub(crate) async fn handle_done(
     ctx: &mut RunCtx<'_>,
     response: CompactString,

@@ -20,14 +20,14 @@ pub struct SemanticManager {
 }
 
 impl SemanticManager {
+    // `mut` and the post-`Vec::new()` pushes are conditionally needed
+    // depending on which language adapter features are active. The
+    // `#[cfg]` gating doesn't compose with `vec![]` so we keep the
+    // `Vec::new() + push` pattern and silence both lints at the fn
+    // level (an item-level `#[allow]` on the local binding doesn't
+    // suppress clippy here in practice).
+    #[allow(unused_mut, clippy::vec_init_then_push)]
     pub fn new() -> Self {
-        // `mut` is conditionally needed depending on which language
-        // adapter features are active. Suppress the warning so a
-        // `semantic` build without any of the language sub-features
-        // (`semantic-ts`/`-python`/`-bash`) doesn't trip the linter.
-        // `vec![]` doesn't compose with the per-feature `#[cfg]`-gated
-        // pushes below; suppress both lints together.
-        #[allow(unused_mut, clippy::vec_init_then_push)]
         let mut adapters: Vec<Box<dyn LanguageAdapter>> = Vec::new();
 
         #[cfg(feature = "semantic-ts")]

@@ -257,6 +257,39 @@ fn review_runner_gets_isolated_cache_dirge_7ls() {
     assert!(parent_clone.get("key").is_none());
 }
 
+/// dirge-z73i: `with_review_route` stashes the alternate stream_fn,
+/// provider alias, and model name on AnyAgent so
+/// `spawn_review_runner_with_cache` can pick them up. This is a pure
+/// fixture test — verifies the setter records the values without
+/// firing the full review runner (which would need a live client).
+#[test]
+fn with_review_route_stashes_alternate_route_dirge_z73i() {
+    use crate::agent::agent_loop::message::StreamEvent;
+    use std::sync::Arc;
+
+    let agent = build_openai_any_agent();
+    assert!(
+        agent.review_stream_fn.is_none(),
+        "fresh agent has no review route by default"
+    );
+    assert!(agent.review_provider_name.is_none());
+    assert!(agent.review_model_name.is_none());
+
+    // Build a dummy review stream_fn — just yields a single Error
+    // event so we can verify identity (it's a different closure
+    // from the main agent's stream_fn).
+    let dummy: crate::agent::agent_loop::StreamFn = Arc::new(|_ctx, _opts| {
+        Box::pin(futures::stream::iter(vec![StreamEvent::Error {
+            error: "from-review-route".to_string(),
+        }]))
+    });
+
+    let agent = agent.with_review_route(dummy.clone(), "glm".to_string(), "glm-4.6".to_string());
+    assert!(agent.review_stream_fn.is_some(), "stream_fn stashed");
+    assert_eq!(agent.review_provider_name.as_deref(), Some("glm"));
+    assert_eq!(agent.review_model_name.as_deref(), Some("glm-4.6"));
+}
+
 // --- C6/C7: compaction prefix is full + includes tool calls -----
 
 use super::summarize;
