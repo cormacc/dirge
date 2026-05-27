@@ -526,14 +526,43 @@ impl AnyClient {
             _ => "(none)".to_string(),
         };
 
+        // dirge-u13u: prompt-injection defense. Before we fence the
+        // untrusted inputs with our distinctive delimiter pair, scan
+        // them for the delimiter itself. If an attacker (via a prior
+        // tool output, fetched URL, user paste, etc.) has managed to
+        // smuggle the delimiter string in, re-wrapping would let them
+        // close our fence and inject instructions outside it. Bail
+        // rather than risk it. The warning stays on the operator side
+        // (tracing) — we do NOT surface the collision detail to the
+        // LLM. The caller treats this `Err` as "skip compaction for
+        // this turn".
+        let prev_summary_value = previous_summary.unwrap_or("(none)");
+        if prompt::input_contains_compaction_delimiter(&[
+            &conversation,
+            prev_summary_value,
+            &instructions_block,
+        ]) {
+            tracing::warn!(
+                "compaction input contains the untrusted-material delimiter — \
+                 skipping compaction this turn to avoid prompt-injection risk"
+            );
+            anyhow::bail!("compaction aborted: input contains reserved delimiter string");
+        }
+
         let prompt = prompt::COMPACTION_PROMPT
             .replace("{conversation}", &conversation)
-            .replace("{previous_summary}", previous_summary.unwrap_or("(none)"))
+            .replace("{previous_summary}", prev_summary_value)
             .replace("{instructions}", &instructions_block);
 
         let model = self.completion_model(model_name.to_string());
         let response = summarize::summarize_with_model(model, prompt).await?;
-        Ok(response)
+        // If the summarizer echoed the delimiters into its output,
+        // strip them before the summary gets injected into the next
+        // turn's system prompt via `rig_history_system_prompt`. A
+        // stray delimiter in the system prompt would (a) confuse the
+        // next-turn LLM about where the untrusted block ends and
+        // (b) trip our collision check on the next compaction.
+        Ok(prompt::strip_compaction_delimiters(&response))
     }
 }
 
@@ -1028,6 +1057,15 @@ impl AnyAgent {
         }
     }
 
+    /// Internal accessor for the agent's tool result cache.
+    /// Exposed `pub(crate)` so tests in `provider::mod_tests`
+    /// can assert cache-isolation invariants (e.g. dirge-7ls:
+    /// the background-review runner must NOT share this Arc).
+    #[allow(dead_code)]
+    pub(crate) fn cache(&self) -> &ToolCache {
+        &self.cache
+    }
+
     pub fn spawn_runner(
         self,
         prompt: String,
@@ -1125,15 +1163,51 @@ impl AnyAgent {
     /// Spawn a review runner with only memory + skill tools.
     /// Used by background review (Phase 4) to create a restricted
     /// agent that can only write to project memory and skills.
+    ///
+    /// dirge-7ls: the review runner gets its OWN `ToolCache` rather
+    /// than reusing the main agent's. Even though today's
+    /// memory/skill tools don't touch the cache directly, any
+    /// future tool added to the review allow-list (or any future
+    /// invalidation hook like `cache.clear()` on memory writes)
+    /// must not pollute the main agent's cache mid-session.
+    /// `subagents/task` is deliberately NOT changed — subagents
+    /// share with their parent by design.
     pub fn spawn_review_runner(
         &self,
         prompt: String,
         transcript: String,
     ) -> crate::agent::runner::AgentRunner {
+        let (runner, _isolated_cache) =
+            self.spawn_review_runner_with_cache(prompt, transcript, ToolCache::new());
+        runner
+    }
+
+    /// Internal review-runner constructor with an explicit
+    /// caller-supplied cache. Returns the cache alongside the
+    /// runner so tests can assert cache isolation via
+    /// `ToolCache::shares_storage_with` against `self.cache()`
+    /// (dirge-7ls regression test). Callers in production code
+    /// should use `spawn_review_runner`, which passes
+    /// `ToolCache::new()` here.
+    pub(crate) fn spawn_review_runner_with_cache(
+        &self,
+        prompt: String,
+        transcript: String,
+        review_cache: ToolCache,
+    ) -> (crate::agent::runner::AgentRunner, ToolCache) {
         use crate::agent::agent_loop::{
             LoopSpawnConfig, loop_tool_to_rig_definition, retrying_stream_fn, spawn_loop_runner,
         };
         use crate::agent::recovery::RecoveryPolicy;
+
+        // Hard guard against accidental sharing: if a caller
+        // somehow passes the parent's cache, the regression test
+        // would fail — but defense-in-depth, debug_assert that
+        // the passed cache is distinct from the parent's.
+        debug_assert!(
+            !review_cache.shares_storage_with(&self.cache),
+            "spawn_review_runner_with_cache: review cache must not share storage with the main agent's cache (dirge-7ls)"
+        );
 
         // Filter to only memory + skill tools.
         let review_tools: Vec<std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>> = self
@@ -1170,7 +1244,7 @@ impl AnyAgent {
         };
 
         let loop_runner = spawn_loop_runner(cfg);
-        loop_runner.into_agent_runner()
+        (loop_runner.into_agent_runner(), review_cache)
     }
 
     /// Phase 4.5h-2: produce a `StreamFn` from this agent's

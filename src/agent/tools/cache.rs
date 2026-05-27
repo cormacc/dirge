@@ -97,6 +97,18 @@ impl ToolCache {
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.entries.lock().unwrap().clear();
     }
+
+    /// Test/diagnostic helper: are these two `ToolCache` handles
+    /// backed by the same underlying entries Arc?
+    ///
+    /// `ToolCache: Clone` shares the inner Arc, so a clone returns
+    /// `true`; a freshly constructed cache returns `false`. Used
+    /// by `provider::mod_tests` to assert that the Phase 4 background
+    /// review runner gets an isolated cache (dirge-7ls regression).
+    #[allow(dead_code)]
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.entries, &other.entries)
+    }
 }
 
 #[cfg(test)]

@@ -370,10 +370,13 @@ mod tests {
         let tool = SkillTool::new(skills, mgr, None, None, None);
         let rt = make_runtime();
 
+        // After the dirge-1ia name-validation loosening, spaces /
+        // mixed case are accepted. A path separator is still
+        // forbidden — that's what we test here now.
         let result = rt.block_on(tool.call(SkillArgs {
             action: "create".into(),
-            name: Some("Bad Name".into()),
-            content: Some("---\nname: Bad Name\n---\n\nbody\n".into()),
+            name: Some("bad/name".into()),
+            content: Some("---\nname: bad/name\n---\n\nbody\n".into()),
             old_string: None,
             new_string: None,
         }));

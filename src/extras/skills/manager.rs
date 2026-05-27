@@ -297,8 +297,10 @@ mod tests {
 
     #[test]
     fn create_rejects_invalid_name() {
+        // dirge-1ia loosened name validation: spaces / mixed case
+        // are now legal, but path separators are still rejected.
         let (mgr, _dir) = temp_manager();
-        let err = mgr.create("Bad Name", "", "", &[]).unwrap_err();
+        let err = mgr.create("bad/name", "", "body", &[]).unwrap_err();
         assert!(err.contains("Skill name"), "got: {err}");
     }
 

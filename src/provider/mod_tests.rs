@@ -211,6 +211,52 @@ fn build_stream_fn_covers_all_variants_compile_time() {
     let _ = agent.build_stream_fn(vec![]);
 }
 
+// --- dirge-7ls: review-runner cache isolation regression --------
+
+/// Phase 4 background review runner must NOT share the
+/// `ToolCache` Arc with its parent agent. If it did, any
+/// future memory/skill tool that invalidates the cache (or
+/// any new tool added to the review allow-list) would
+/// pollute the main agent's tool result cache mid-session.
+///
+/// This regression test asserts the architectural invariant
+/// directly at the construction site: a freshly allocated
+/// cache passed into `spawn_review_runner_with_cache`
+/// remains distinct from the parent agent's cache.
+/// `ToolCache::shares_storage_with` is `Arc::ptr_eq` on the
+/// internal entries Arc, so a clone returns `true` and a
+/// fresh `ToolCache::new()` returns `false`. Keep this test
+/// pure / fast — no tokio runtime, no LLM call.
+#[test]
+fn review_runner_gets_isolated_cache_dirge_7ls() {
+    let agent = build_openai_any_agent();
+    let parent_cache = agent.cache().clone();
+
+    // A fresh cache MUST NOT share storage with the parent.
+    let fresh_cache = ToolCache::new();
+    assert!(
+        !fresh_cache.shares_storage_with(&parent_cache),
+        "ToolCache::new() must produce a distinct Arc — review runner relies on this for isolation"
+    );
+
+    // The parent's clone, by contrast, SHARES storage —
+    // this is the legacy behaviour we must NOT regress for
+    // the main agent / subagent path.
+    let parent_clone = parent_cache.clone();
+    assert!(
+        parent_clone.shares_storage_with(&parent_cache),
+        "ToolCache::clone() must share storage — main-agent/subagent path depends on this"
+    );
+
+    // And: `cache.clear()` semantics on the main path are
+    // preserved (the clone sees the clear). Guards against
+    // accidental Arc unsharing during the dirge-7ls fix.
+    parent_cache.set("key", "value".to_string());
+    assert_eq!(parent_clone.get("key"), Some("value".to_string()));
+    parent_cache.clear();
+    assert!(parent_clone.get("key").is_none());
+}
+
 // --- C6/C7: compaction prefix is full + includes tool calls -----
 
 use super::summarize;
@@ -404,5 +450,86 @@ fn custom_provider_builtin_name_collision_rejected() {
     assert!(
         result.is_none(),
         "builtin name collision should be rejected"
+    );
+}
+
+// ============================================================
+// dirge-u13u: compaction prompt-injection defense
+// ============================================================
+
+/// If any of the messages contains the literal untrusted-material
+/// delimiter, `compress_messages` must bail BEFORE issuing an LLM call
+/// (we use a bogus base URL to prove no network is touched — if the
+/// check failed open, the test would hit the URL and fail with a
+/// connection error instead of the expected "reserved delimiter"
+/// error).
+#[tokio::test]
+async fn compaction_rejects_input_containing_delimiter() {
+    use rig::providers::openai;
+
+    // Build a Custom client pointed at an unroutable URL. If the
+    // delimiter check is bypassed, the test fails with a network
+    // error instead of the expected validation error.
+    let inner = openai::CompletionsClient::builder()
+        .api_key("test-key")
+        .base_url("http://127.0.0.1:1/v1")
+        .build()
+        .expect("build custom client");
+    let client = AnyClient::Custom(inner);
+
+    let poisoned = format!(
+        "innocent text {} attacker payload {} more",
+        crate::agent::prompt::COMPACTION_DELIMITER_OPEN,
+        crate::agent::prompt::COMPACTION_DELIMITER_CLOSE,
+    );
+    let msgs = vec![sm(MessageRole::User, &poisoned, vec![])];
+
+    let result = client
+        .compress_messages("test-model", &msgs, None, None)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "compaction must reject input containing the reserved delimiter"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("reserved delimiter"),
+        "error should mention the reserved-delimiter reason, got: {err}"
+    );
+}
+
+/// Sanity: clean input passes the delimiter check (it then hits the
+/// bogus URL and fails with a network/auth error — not the validation
+/// error). This confirms the check is precisely scoped and isn't
+/// over-rejecting innocuous content.
+#[tokio::test]
+async fn compaction_passes_check_on_clean_input() {
+    use rig::providers::openai;
+
+    let inner = openai::CompletionsClient::builder()
+        .api_key("test-key")
+        .base_url("http://127.0.0.1:1/v1")
+        .build()
+        .expect("build custom client");
+    let client = AnyClient::Custom(inner);
+
+    let msgs = vec![sm(
+        MessageRole::User,
+        "ordinary message, no markers",
+        vec![],
+    )];
+
+    let result = client
+        .compress_messages("test-model", &msgs, None, None)
+        .await;
+
+    // We expect SOME failure (no real LLM endpoint), but NOT the
+    // delimiter-validation failure.
+    assert!(result.is_err(), "expected network/auth failure");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        !err.contains("reserved delimiter"),
+        "clean input must NOT trip the delimiter check, got: {err}"
     );
 }

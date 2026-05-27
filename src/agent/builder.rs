@@ -144,8 +144,23 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         .unwrap_or_else(|_| {
             crate::extras::dirge_paths::ProjectPaths::new(std::path::Path::new("."))
         });
+    // dirge-dktb: `MemoryToolStore::load` performs synchronous file
+    // I/O for both memory + pitfalls. On slow filesystems (NFS,
+    // network mounts) this blocks the async runtime worker thread
+    // during agent construction. Move the synchronous load onto
+    // the blocking pool, mirroring the `skill::discover_skills`
+    // shape above. `unwrap_or_default()` collapses both a
+    // `spawn_blocking` JoinError and a load error into `None`,
+    // which matches the previous `Err(_) => None` branch.
+    let paths_for_mem = paths.clone();
+    let memory_load_result: Result<crate::extras::memory_store::MemoryToolStore, String> =
+        tokio::task::spawn_blocking(move || {
+            crate::extras::memory_store::MemoryToolStore::load(&paths_for_mem)
+        })
+        .await
+        .unwrap_or_else(|_| Err("spawn_blocking join failed".to_string()));
     let memory_store: Option<Arc<crate::extras::memory_store::MemoryToolStore>> =
-        match crate::extras::memory_store::MemoryToolStore::load(&paths) {
+        match memory_load_result {
             Ok(store) => {
                 let mem_text = store.format_for_system_prompt();
                 if !mem_text.is_empty() {
@@ -580,12 +595,19 @@ pub async fn build_loop_tools(
             .unwrap_or_default(),
     );
 
+    // dirge-dktb: same synchronous-I/O fix as `build_agent_inner`.
+    // Off-load the disk read to the blocking pool so a slow
+    // filesystem can't stall the async runtime worker.
     let memory_store: Option<Arc<crate::extras::memory_store::MemoryToolStore>> =
         if let Ok(c) = std::env::current_dir() {
             let paths = crate::extras::dirge_paths::ProjectPaths::new(&c);
-            crate::extras::memory_store::MemoryToolStore::load(&paths)
-                .ok()
-                .map(Arc::new)
+            tokio::task::spawn_blocking(move || {
+                crate::extras::memory_store::MemoryToolStore::load(&paths)
+                    .ok()
+                    .map(Arc::new)
+            })
+            .await
+            .unwrap_or_default()
         } else {
             None
         };
