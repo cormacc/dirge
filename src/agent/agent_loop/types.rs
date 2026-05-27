@@ -332,6 +332,38 @@ pub struct LoopConfig {
     /// inspect the setting without rebuilding the request-side
     /// filter independently.
     pub dynamic_tool_search: bool,
+
+    /// Phase 4 part 1: alternate stream function used for ONE call
+    /// after a repair-exhaustion or tree-sitter failure. None when
+    /// escalation isn't configured.
+    pub escalation_stream_fn: Option<super::stream::StreamFn>,
+
+    /// Phase 4 part 1: name of the escalation provider (for tracing /
+    /// UI surfacing). `None` when no escalation configured.
+    pub escalation_provider_name: Option<String>,
+
+    /// Phase 4 part 1: shared state — when `Some(reason)`, the NEXT
+    /// call to `stream_assistant_response` swaps to `escalation_stream_fn`
+    /// and clears the flag. `reason` propagates to the LoopEvent and
+    /// to the tool-result Note.
+    pub escalation_pending:
+        std::sync::Arc<std::sync::Mutex<Option<super::message::EscalationReason>>>,
+
+    /// Phase 4 part 1: per-session cap to prevent ping-ponging. Default 3.
+    /// `try_arm_escalation` decrements a per-session counter and refuses
+    /// to arm once it hits zero.
+    pub escalation_max_per_session: usize,
+
+    /// Phase 4 part 1: remaining escalation budget for this session.
+    /// Initialised to `escalation_max_per_session`; decremented by
+    /// `try_arm_escalation`. Shared Arc<AtomicUsize> so the
+    /// counter survives `LoopConfig::clone()` (the loop re-clones
+    /// across retry boundaries).
+    pub escalation_remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Phase 4 part 2: per-session file-touch tracker for context-depth
+    /// reminders. None when the feature isn't configured.
+    pub file_touch_tracker: Option<std::sync::Arc<super::context_depth::FileTouchTracker>>,
 }
 
 /// `convertToLlm` signature. Synchronous in pi (returns
@@ -413,6 +445,29 @@ impl std::fmt::Debug for LoopConfig {
                 &self.tool_def_filter.as_ref().map(|_| "<set>"),
             )
             .field("dynamic_tool_search", &self.dynamic_tool_search)
+            .field(
+                "escalation_stream_fn",
+                &self.escalation_stream_fn.as_ref().map(|_| "<fn>"),
+            )
+            .field("escalation_provider_name", &self.escalation_provider_name)
+            .field(
+                "escalation_pending",
+                &self.escalation_pending.lock().ok().and_then(|g| g.clone()),
+            )
+            .field(
+                "escalation_max_per_session",
+                &self.escalation_max_per_session,
+            )
+            .field(
+                "escalation_remaining",
+                &self
+                    .escalation_remaining
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .field(
+                "file_touch_tracker",
+                &self.file_touch_tracker.as_ref().map(|_| "<tracker>"),
+            )
             .finish()
     }
 }
@@ -444,6 +499,12 @@ impl Clone for LoopConfig {
             repair_stats: self.repair_stats.clone(),
             tool_def_filter: self.tool_def_filter.clone(),
             dynamic_tool_search: self.dynamic_tool_search,
+            escalation_stream_fn: self.escalation_stream_fn.clone(),
+            escalation_provider_name: self.escalation_provider_name.clone(),
+            escalation_pending: self.escalation_pending.clone(),
+            escalation_max_per_session: self.escalation_max_per_session,
+            escalation_remaining: self.escalation_remaining.clone(),
+            file_touch_tracker: self.file_touch_tracker.clone(),
         }
     }
 }

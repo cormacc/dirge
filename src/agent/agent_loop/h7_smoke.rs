@@ -171,6 +171,9 @@ fn dump_events(events: &[AgentEvent]) {
                     snapshot.invalid,
                 );
             }
+            AgentEvent::EscalationActivated { provider, reason } => {
+                eprintln!("\n[escalation] provider={provider} reason={reason:?}");
+            }
         }
     }
     eprintln!();
@@ -209,6 +212,10 @@ async fn h7_scenario_1_simple_text() {
         summarize_fn: None,
         tool_def_filter: None,
         dynamic_tool_search: false,
+        escalation_stream_fn: None,
+        escalation_provider_name: None,
+        escalation_max_per_session: None,
+        file_touch_tracker: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -279,6 +286,10 @@ async fn h7_scenario_2_turn_boundaries() {
         summarize_fn: None,
         tool_def_filter: None,
         dynamic_tool_search: false,
+        escalation_stream_fn: None,
+        escalation_provider_name: None,
+        escalation_max_per_session: None,
+        file_touch_tracker: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -383,6 +394,10 @@ async fn h7_scenario_5_auth_error_surfaces() {
         summarize_fn: None,
         tool_def_filter: None,
         dynamic_tool_search: false,
+        escalation_stream_fn: None,
+        escalation_provider_name: None,
+        escalation_max_per_session: None,
+        file_touch_tracker: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, _) = drain_to_done(runner).await;
@@ -539,6 +554,10 @@ async fn h7_scenario_3_tool_dispatch() {
         summarize_fn: None,
         tool_def_filter: None,
         dynamic_tool_search: false,
+        escalation_stream_fn: None,
+        escalation_provider_name: None,
+        escalation_max_per_session: None,
+        file_touch_tracker: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -647,6 +666,10 @@ async fn h7_glm_scenario_1_simple_text() {
         summarize_fn: None,
         tool_def_filter: None,
         dynamic_tool_search: false,
+        escalation_stream_fn: None,
+        escalation_provider_name: None,
+        escalation_max_per_session: None,
+        file_touch_tracker: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -773,6 +796,10 @@ async fn h7_glm_scenario_3_tool_dispatch() {
         summarize_fn: None,
         tool_def_filter: None,
         dynamic_tool_search: false,
+        escalation_stream_fn: None,
+        escalation_provider_name: None,
+        escalation_max_per_session: None,
+        file_touch_tracker: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;

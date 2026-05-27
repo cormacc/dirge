@@ -377,6 +377,12 @@ mod tests {
             ),
             tool_def_filter: None,
             dynamic_tool_search: false,
+            escalation_stream_fn: None,
+            escalation_provider_name: None,
+            escalation_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            escalation_max_per_session: 3,
+            escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
+            file_touch_tracker: None,
         };
         config.get_steering_messages = Some(steering_from_queue(queue.clone(), QueueMode::All));
 

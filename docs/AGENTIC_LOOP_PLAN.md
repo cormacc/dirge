@@ -77,8 +77,8 @@ execution order, and the audit-tracked logging of original args
 | **Phase 2** Janet-defined tool schemas | 🟡 plugins can register tools but they're not generating JSON schema for built-in tools |
 | **Phase 3** Prompt topography for cache | ❌ no explicit cache-positioning logic |
 | **Phase 3** Streaming-to-disk for large output | ❌ (truncate-and-cap, not write-and-summary) |
-| **Phase 4** Dual-client cognitive routing | ❌ subagent + main client paths exist but no "escalate on repair exhaustion" wiring |
-| **Phase 4** Context depth counter | ❌ |
+| **Phase 4** Dual-client cognitive routing | ✅ shipped — escalation route swaps to `escalation_provider` for ONE call after repair-exhaustion or tree-sitter syntactic failure; surfaced as `EscalationActivated` event |
+| **Phase 4** Context depth counter | ✅ shipped — `FileTouchTracker` counts consecutive turns touching same files; emits one-shot reminder via steering hook when `context_depth_reminder_threshold` is crossed |
 
 ---
 
@@ -179,26 +179,34 @@ outputs no longer overflow context.
 
 **Goal**: keep the agent grounded over long runs.
 
-1. **Dual-client tiering** — extend `AnyClient` so a single
-   session can route different turns through different models.
-   Default to the user's configured model; on repair-exhaustion
-   OR tree-sitter syntactic-failure in the same tool call,
-   escalate the NEXT retry to a more capable tier (configurable
-   per provider, e.g., `deepseek-v4-pro` if main is `flash`).
-   Surface the escalation as a `Note:` in the tool result so
-   the user can see it happened.
-2. **Context-depth reminder system** — count consecutive turns
-   that touched the same file (`session_search` already gives
-   us the data). When the count crosses a threshold (e.g. 8),
-   inject a system-reminder summarising the active task + key
-   decisions. Counter resets when the user submits a fresh
-   prompt that doesn't mention the same files.
-3. **Programmatic tool calling** (stretch) — let the model emit
-   a Janet (or restricted Python) snippet that orchestrates
-   multiple tool calls. Plugin system already runs Janet on a
-   worker thread; binding tool-call APIs into the Janet context
-   is the bulk of the work. Could land standalone after
-   Phase 4.
+1. **Dual-client tiering** — ✅ shipped. `LoopConfig.escalation_stream_fn`
+   carries an alternate stream built at `build_agent` time when
+   `ConfigRole::Escalation` resolves to a different provider than
+   `ConfigRole::Default`. After a repair-exhaustion in
+   `tools::prepare_tool_call` OR a tree-sitter syntactic failure
+   detected in the tool dispatcher (matched on the canonical
+   `SYNTAX_CHECK_PREFIX`), `try_arm_escalation` decrements the
+   per-session budget (default 3) and flips
+   `escalation_pending`. The next `stream_assistant_response`
+   call observes the flag, swaps the stream_fn, emits
+   `LoopEvent::EscalationActivated`, and clears the flag. The
+   UI prints `↑ escalating to <provider> (next turn): <reason>`
+   on a dim line.
+2. **Context-depth reminder system** — ✅ shipped.
+   `FileTouchTracker` (in `agent_loop::context_depth`) records
+   each prepared tool call's args, extracts file paths
+   (`path` / `paths` / `file_path` / `file`), and counts
+   consecutive turns that touched at least one file in common.
+   When the streak crosses `context_depth_reminder_threshold`
+   (config key, off by default), `poll_reminder` returns a
+   single user-style steering message wrapped with
+   `MID_TURN_STEER_WRAPPER`, naming the touched files +
+   restating the active task. A new user prompt that mentions
+   none of the current files resets the streak.
+3. **Programmatic tool calling** — deferred (stretch goal).
+   Plugin system already runs Janet on a worker thread; binding
+   tool-call APIs into the Janet context is the bulk of the
+   work. Tracked but not on the immediate roadmap.
 
 **Deliverable**: 1000-turn session stays on task; spec'd budget
 escalation handles deep-semantic failures without manual

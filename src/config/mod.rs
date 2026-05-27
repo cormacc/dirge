@@ -221,6 +221,14 @@ pub struct Config {
     /// "ship every tool every turn" path. Useful on long sessions
     /// with MCP-heavy toolsets (≈30% token savings).
     pub dynamic_tool_search: Option<bool>,
+
+    /// Phase 4 part 2 (`docs/AGENTIC_LOOP_PLAN.md`): consecutive-turn
+    /// threshold for the context-depth reminder system. `None`
+    /// (default) keeps the feature OFF — long sessions get no
+    /// reminders. Recommended value: 8. Set lower for tighter
+    /// re-focusing; higher to silence the reminder for routine
+    /// multi-step refactors.
+    pub context_depth_reminder_threshold: Option<usize>,
     #[cfg(feature = "lsp")]
     pub lsp: Option<LspConfig>,
     #[cfg(feature = "mcp")]
@@ -238,6 +246,18 @@ impl Config {
     /// Snapshot of the unified providers map. Empty when not set.
     pub fn providers_map(&self) -> HashMap<String, ProviderEntry> {
         self.providers.clone().unwrap_or_default()
+    }
+
+    /// Phase 4 part 2: resolve the context-depth reminder
+    /// threshold. Trivially returns the field — encapsulated as a
+    /// method so future callers don't see the `Option` directly
+    /// and so we can add validation (e.g. clamp to >= 1) without
+    /// changing every consumer.
+    pub fn resolve_context_depth_threshold(&self) -> Option<usize> {
+        // Clamp to a minimum of 2: a threshold of 0 or 1 would
+        // emit a reminder on the very first tool call, which
+        // defeats the purpose.
+        self.context_depth_reminder_threshold.map(|t| t.max(2))
     }
 
     /// Resolve a logical role to `(alias, entry)`. For non-default

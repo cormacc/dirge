@@ -177,7 +177,45 @@ pub async fn stream_assistant_response(
         request_timeout: config.request_timeout,
         signal,
     };
-    let mut stream = stream_fn(llm_ctx, stream_options);
+
+    // Phase 4 part 1: if escalation is armed, route this single
+    // call through the alternate stream_fn and clear the flag.
+    // The flag is always cleared on observation — a misconfigured
+    // session (pending=Some, escalation_stream_fn=None) doesn't
+    // become "stuck armed" across turns. The default stream_fn is
+    // used in that case so no LLM call is dropped.
+    //
+    // Scope the MutexGuard to a synchronous block so it's released
+    // BEFORE any `.await` — guards aren't `Send` and would taint
+    // the future's Send-ness otherwise.
+    let pending_reason: Option<super::message::EscalationReason> = {
+        let mut pending = config
+            .escalation_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        pending.take()
+    };
+    let use_escalation = pending_reason.is_some() && config.escalation_stream_fn.is_some();
+    if let Some(reason) = pending_reason
+        && use_escalation
+    {
+        let provider = config
+            .escalation_provider_name
+            .clone()
+            .unwrap_or_else(|| "escalation".to_string());
+        let _ = emit
+            .send(LoopEvent::EscalationActivated { provider, reason })
+            .await;
+    }
+    let active_stream_fn: &StreamFn = if use_escalation {
+        config
+            .escalation_stream_fn
+            .as_ref()
+            .expect("checked Some above")
+    } else {
+        stream_fn
+    };
+    let mut stream = active_stream_fn(llm_ctx, stream_options);
 
     // 5. Iterate events.
     let mut added_partial = false;
@@ -413,6 +451,12 @@ mod tests {
             ),
             tool_def_filter: None,
             dynamic_tool_search: false,
+            escalation_stream_fn: None,
+            escalation_provider_name: None,
+            escalation_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            escalation_max_per_session: 3,
+            escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
+            file_touch_tracker: None,
         }
     }
 
@@ -714,6 +758,12 @@ mod tests {
             ),
             tool_def_filter: None,
             dynamic_tool_search: false,
+            escalation_stream_fn: None,
+            escalation_provider_name: None,
+            escalation_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            escalation_max_per_session: 3,
+            escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
+            file_touch_tracker: None,
         };
         let signal = AbortSignal::new();
         let (tx, mut rx) = mpsc::channel::<LoopEvent>(32);
@@ -777,5 +827,186 @@ mod tests {
             vec!["message_start", "message_end"],
             "fallback must emit message_start + message_end (pi 363-366)",
         );
+    }
+
+    // ============================================================
+    // Phase 4 part 1 — dual-client escalation tests
+    // ============================================================
+
+    /// Helper: build a canned stream_fn that records which
+    /// instance was invoked via a shared label.
+    fn labelled_stream(
+        label: &'static str,
+        observed: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    ) -> StreamFn {
+        Arc::new(move |_ctx, _opts| {
+            observed.lock().unwrap().push(label);
+            let msg = AssistantMessage::new(
+                vec![ContentBlock::Text {
+                    text: format!("{label}-response"),
+                }],
+                StopReason::Stop,
+            );
+            Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+                reason: StopReason::Stop,
+                message: msg,
+                usage: None,
+            }]))
+        })
+    }
+
+    /// `try_arm_escalation` armed → next stream call swaps to
+    /// `escalation_stream_fn`.
+    #[tokio::test]
+    async fn escalation_arm_then_swap_uses_alternate_stream_fn() {
+        use crate::agent::agent_loop::message::EscalationReason;
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let default_fn = labelled_stream("default", observed.clone());
+        let escalation_fn = labelled_stream("escalation", observed.clone());
+
+        let mut config = build_config(identity_converter());
+        config.escalation_stream_fn = Some(escalation_fn);
+        config.escalation_provider_name = Some("alt-provider".to_string());
+        // Pre-arm escalation directly (don't go through the tools
+        // dispatcher — this is an isolated stream-level test).
+        *config.escalation_pending.lock().unwrap() = Some(EscalationReason::RepairExhausted {
+            tool: "write".to_string(),
+        });
+
+        let mut ctx = Context::default();
+        let (tx, _rx) = mpsc::channel::<LoopEvent>(32);
+        let _ = stream_assistant_response(&mut ctx, &config, AbortSignal::new(), &tx, &default_fn)
+            .await;
+
+        assert_eq!(observed.lock().unwrap().as_slice(), &["escalation"]);
+    }
+
+    /// After the swap fires once, the pending flag is cleared and
+    /// the SECOND call uses the default stream_fn again.
+    #[tokio::test]
+    async fn escalation_flag_cleared_after_one_call() {
+        use crate::agent::agent_loop::message::EscalationReason;
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let default_fn = labelled_stream("default", observed.clone());
+        let escalation_fn = labelled_stream("escalation", observed.clone());
+
+        let mut config = build_config(identity_converter());
+        config.escalation_stream_fn = Some(escalation_fn);
+        config.escalation_provider_name = Some("alt-provider".to_string());
+        *config.escalation_pending.lock().unwrap() = Some(EscalationReason::SyntacticFailure {
+            tool: "edit".to_string(),
+            path: "src/foo.rs".to_string(),
+        });
+
+        let mut ctx = Context::default();
+        let (tx, _rx) = mpsc::channel::<LoopEvent>(32);
+        // First call: escalation.
+        let _ = stream_assistant_response(&mut ctx, &config, AbortSignal::new(), &tx, &default_fn)
+            .await;
+        // Second call: default — the pending flag was cleared by
+        // the first call's swap.
+        let _ = stream_assistant_response(&mut ctx, &config, AbortSignal::new(), &tx, &default_fn)
+            .await;
+
+        assert_eq!(
+            observed.lock().unwrap().as_slice(),
+            &["escalation", "default"]
+        );
+        assert!(config.escalation_pending.lock().unwrap().is_none());
+    }
+
+    /// Pending flag is set BUT `escalation_stream_fn` is None
+    /// (misconfigured session). The default stream_fn is used AND
+    /// the flag is cleared on observation so it doesn't stay
+    /// armed forever.
+    #[tokio::test]
+    async fn escalation_no_op_when_alternate_is_none() {
+        use crate::agent::agent_loop::message::EscalationReason;
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let default_fn = labelled_stream("default", observed.clone());
+
+        let mut config = build_config(identity_converter());
+        // No escalation_stream_fn set — misconfigured.
+        *config.escalation_pending.lock().unwrap() = Some(EscalationReason::RepairExhausted {
+            tool: "write".to_string(),
+        });
+
+        let mut ctx = Context::default();
+        let (tx, _rx) = mpsc::channel::<LoopEvent>(32);
+        let _ = stream_assistant_response(&mut ctx, &config, AbortSignal::new(), &tx, &default_fn)
+            .await;
+
+        assert_eq!(observed.lock().unwrap().as_slice(), &["default"]);
+        // The flag is cleared so a misconfigured session doesn't
+        // keep an unactionable armed flag forever.
+        assert!(config.escalation_pending.lock().unwrap().is_none());
+    }
+
+    /// `try_arm_escalation` respects the per-session cap. Set
+    /// max=2 and call try_arm 5 times — only 2 should land.
+    #[tokio::test]
+    async fn escalation_max_per_session_caps_arming() {
+        use crate::agent::agent_loop::message::EscalationReason;
+        use crate::agent::agent_loop::tools::try_arm_escalation;
+        use std::sync::atomic::Ordering;
+
+        let mut config = build_config(identity_converter());
+        config.escalation_max_per_session = 2;
+        config.escalation_remaining.store(2, Ordering::SeqCst);
+
+        for _ in 0..5 {
+            try_arm_escalation(
+                &config,
+                EscalationReason::RepairExhausted {
+                    tool: "write".to_string(),
+                },
+            );
+            // Clear so the next arm attempt isn't blocked by the
+            // existing pending flag being still-set. The
+            // arming itself decrements the budget regardless.
+            *config.escalation_pending.lock().unwrap() = None;
+        }
+
+        // The budget is the only thing that should have been
+        // touched twice; subsequent attempts should no-op.
+        assert_eq!(
+            config.escalation_remaining.load(Ordering::SeqCst),
+            0,
+            "budget exhausted exactly twice"
+        );
+    }
+
+    /// The escalation swap emits a `LoopEvent::EscalationActivated`
+    /// on the channel so the bridge / UI can surface it.
+    #[tokio::test]
+    async fn escalation_event_emitted() {
+        use crate::agent::agent_loop::message::EscalationReason;
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let default_fn = labelled_stream("default", observed.clone());
+        let escalation_fn = labelled_stream("escalation", observed.clone());
+
+        let mut config = build_config(identity_converter());
+        config.escalation_stream_fn = Some(escalation_fn);
+        config.escalation_provider_name = Some("anthropic-pro".to_string());
+        *config.escalation_pending.lock().unwrap() = Some(EscalationReason::SyntacticFailure {
+            tool: "write".to_string(),
+            path: "lib.rs".to_string(),
+        });
+
+        let mut ctx = Context::default();
+        let (tx, mut rx) = mpsc::channel::<LoopEvent>(64);
+        let _ = stream_assistant_response(&mut ctx, &config, AbortSignal::new(), &tx, &default_fn)
+            .await;
+        drop(tx);
+
+        let mut saw_escalation = false;
+        while let Some(evt) = rx.recv().await {
+            if let LoopEvent::EscalationActivated { provider, reason } = &evt {
+                assert_eq!(provider, "anthropic-pro");
+                assert!(matches!(reason, EscalationReason::SyntacticFailure { .. }));
+                saw_escalation = true;
+            }
+        }
+        assert!(saw_escalation, "expected EscalationActivated event");
     }
 }

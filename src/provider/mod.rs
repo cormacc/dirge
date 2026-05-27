@@ -567,6 +567,84 @@ impl AnyModel {
         }
     }
 
+    /// Phase 4 part 1: build a standalone `StreamFn` from this
+    /// model + tool definitions. Used to construct the escalation
+    /// route when `ConfigRole::Escalation` resolves to a provider
+    /// different from `ConfigRole::Default`. The result is plumbed
+    /// into `LoopConfig.escalation_stream_fn` and invoked exactly
+    /// once after a repair-exhaustion or tree-sitter failure.
+    ///
+    /// Tools and chunk timeout are passed in (not extracted) for
+    /// symmetry with `AnyAgent::build_stream_fn_with_filter`. The
+    /// escalation stream uses the SAME tool definitions as the
+    /// default — only the model + provider differ.
+    pub fn build_stream_fn(
+        &self,
+        tools: Vec<rig::completion::ToolDefinition>,
+        chunk_timeout: std::time::Duration,
+        provider_name: Option<String>,
+    ) -> crate::agent::agent_loop::StreamFn {
+        use crate::agent::agent_loop::rig_stream_fn_from_model_with_filter;
+        match self {
+            AnyModel::OpenRouter(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+            AnyModel::OpenAI(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+            AnyModel::Anthropic(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+            AnyModel::Gemini(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+            AnyModel::DeepSeek(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+            AnyModel::Glm(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+            AnyModel::Ollama(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+            AnyModel::Custom(m) => rig_stream_fn_from_model_with_filter(
+                m.clone(),
+                tools,
+                Some(chunk_timeout),
+                provider_name,
+                None,
+            ),
+        }
+    }
+
     /// Return the model identifier string that was passed when
     /// the model was built (`client.completion_model("…")`).
     /// Forwarded to `LoopConfig.model_name` so the
@@ -628,6 +706,22 @@ pub struct AnyAgent {
     /// stream factory so the filter sees the same set the tool
     /// mutates. `None` when the feature is off.
     tool_def_filter: Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
+    /// Phase 4 part 1: alternate stream function for dual-client
+    /// escalation. Constructed at `build_agent` time when
+    /// `ConfigRole::Escalation` resolves to a DIFFERENT provider
+    /// than `ConfigRole::Default`. `None` keeps the legacy single-
+    /// provider behaviour byte-for-byte identical.
+    escalation_stream_fn: Option<crate::agent::agent_loop::StreamFn>,
+    /// Phase 4 part 1: provider alias for the escalation route.
+    /// Forwarded to `LoopConfig.escalation_provider_name` so the
+    /// UI's `EscalationActivated` line can show the user which
+    /// provider is taking over. `None` when escalation is off.
+    escalation_provider_name: Option<String>,
+    /// Phase 4 part 2: optional context-depth reminder threshold.
+    /// Forwarded to `spawn_runner`, which constructs a fresh
+    /// `FileTouchTracker` for each session because the tracker is
+    /// per-prompt (`active_task` is the initial prompt).
+    context_depth_reminder_threshold: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -660,7 +754,36 @@ impl AnyAgent {
             model_name,
             dynamic_tool_search: false,
             tool_def_filter: None,
+            escalation_stream_fn: None,
+            escalation_provider_name: None,
+            context_depth_reminder_threshold: None,
         }
+    }
+
+    /// Phase 4 part 1: wire the dual-client escalation route.
+    /// Called by `build_agent` only when `ConfigRole::Escalation`
+    /// resolves to a different provider than `ConfigRole::Default`.
+    /// Pass both the StreamFn and the provider alias so
+    /// `spawn_runner` can plumb them through to `LoopSpawnConfig`.
+    pub fn with_escalation(
+        mut self,
+        stream_fn: crate::agent::agent_loop::StreamFn,
+        provider_name: String,
+    ) -> Self {
+        self.escalation_stream_fn = Some(stream_fn);
+        self.escalation_provider_name = Some(provider_name);
+        self
+    }
+
+    /// Phase 4 part 2: enable the context-depth reminder system
+    /// with the given consecutive-turn threshold. Called by
+    /// `build_agent` only when `config.context_depth_reminder_threshold`
+    /// is `Some`. Carrying the threshold (rather than a tracker
+    /// instance) lets `spawn_runner` build a fresh tracker per
+    /// session seeded with the initial prompt.
+    pub fn with_context_depth_reminder(mut self, threshold: usize) -> Self {
+        self.context_depth_reminder_threshold = Some(threshold);
+        self
     }
 
     /// Phase-3: enable the dynamic-tool-search path for sessions
@@ -928,7 +1051,7 @@ impl AnyAgent {
         // user/assistant/toolResult shapes).
         let loop_history = rig_history_to_loop_messages(history);
 
-        let mut cfg = LoopSpawnConfig::minimal(stream_fn, prompt);
+        let mut cfg = LoopSpawnConfig::minimal(stream_fn, prompt.clone());
         cfg.system_prompt = system_prompt;
         cfg.history = loop_history;
         cfg.tools = self.loop_tools;
@@ -941,6 +1064,20 @@ impl AnyAgent {
         cfg.steering_queue = steering_queue;
         cfg.tool_def_filter = tool_def_filter;
         cfg.dynamic_tool_search = self.dynamic_tool_search;
+        // Phase 4 part 1: thread the escalation route — when set,
+        // the loop's `stream_assistant_response` swaps to this
+        // StreamFn for the call immediately following a repair or
+        // tree-sitter failure. `escalation_stream_fn=None` keeps
+        // the legacy single-provider path byte-for-byte identical.
+        cfg.escalation_stream_fn = self.escalation_stream_fn.clone();
+        cfg.escalation_provider_name = self.escalation_provider_name.clone();
+        // Phase 4 part 2: build a fresh `FileTouchTracker` per
+        // session seeded with the current prompt as the active
+        // task. `None` keeps the feature off — byte-identical to
+        // today.
+        cfg.file_touch_tracker = self
+            .context_depth_reminder_threshold
+            .map(|t| crate::agent::agent_loop::context_depth::FileTouchTracker::new(t, prompt));
         #[cfg(feature = "plugin")]
         {
             cfg.plugin_mgr = crate::plugin::hook::global();
@@ -1237,7 +1374,7 @@ pub async fn build_agent(
         }};
     }
 
-    match model {
+    let mut agent = match model {
         AnyModel::OpenRouter(m) => build_inner!(m, OpenRouter),
         AnyModel::OpenAI(m) => build_inner!(m, OpenAI),
         AnyModel::Anthropic(m) => build_inner!(m, Anthropic),
@@ -1246,7 +1383,130 @@ pub async fn build_agent(
         AnyModel::Glm(m) => build_inner!(m, Glm),
         AnyModel::Ollama(m) => build_inner!(m, Ollama),
         AnyModel::Custom(m) => build_inner!(m, Custom),
+    };
+
+    // Phase 4 part 1 — dual-client escalation wiring.
+    //
+    // When the user has configured `escalation_provider` AND it
+    // resolves to a DIFFERENT (alias, entry) than `ConfigRole::Default`,
+    // build a second StreamFn that the loop will swap to for ONE call
+    // after a repair-exhaustion or tree-sitter syntactic failure.
+    //
+    // The escalation route reuses:
+    //   - The same tool definitions as the default loop (we just
+    //     need a different model behind them).
+    //   - The same chunk timeout — escalation should not be
+    //     stricter or laxer than the default for stream chunk
+    //     health.
+    //
+    // If `escalation_provider` is configured but the alias doesn't
+    // resolve to a present entry AND isn't a built-in (this means
+    // `resolve_role` returns None), surface an error rather than
+    // silently disabling — the user asked for a feature and we
+    // owe them a clear failure mode.
+    if cfg.escalation_provider.is_some() {
+        let default_role = cfg.resolve_role(crate::config::ConfigRole::Default);
+        let escalation_role = cfg.resolve_role(crate::config::ConfigRole::Escalation);
+        match (default_role, escalation_role) {
+            (Some((default_alias, _)), Some((escalation_alias, escalation_entry))) => {
+                // Equal aliases (case-insensitive) → escalation
+                // has no effect; skip the duplicate client.
+                if default_alias.eq_ignore_ascii_case(&escalation_alias) {
+                    tracing::debug!(
+                        target: "dirge::provider",
+                        alias = %escalation_alias,
+                        "escalation provider equals default; skipping duplicate client construction",
+                    );
+                } else {
+                    match build_escalation_stream_fn(
+                        &escalation_alias,
+                        &escalation_entry,
+                        &cfg.providers_map(),
+                        chunk_timeout,
+                        &agent.loop_tools,
+                    ) {
+                        Ok(stream_fn) => {
+                            agent = agent.with_escalation(stream_fn, escalation_alias.clone());
+                            tracing::info!(
+                                target: "dirge::provider",
+                                alias = %escalation_alias,
+                                "dual-client escalation wired",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                target: "dirge::provider",
+                                alias = %escalation_alias,
+                                error = %e,
+                                "failed to construct escalation client; running without escalation",
+                            );
+                            eprintln!(
+                                "warning: escalation_provider '{}' configured but client build failed: {}",
+                                escalation_alias, e
+                            );
+                        }
+                    }
+                }
+            }
+            (_, None) => {
+                // escalation_provider was set but resolve_role
+                // returned None — alias doesn't name a present
+                // entry and isn't a built-in. Hard-fail loudly per
+                // the plan: don't silently disable.
+                let alias = cfg.escalation_provider.clone().unwrap_or_default();
+                tracing::error!(
+                    target: "dirge::provider",
+                    alias = %alias,
+                    "escalation_provider configured but alias does not resolve to a known provider",
+                );
+                eprintln!(
+                    "error: escalation_provider '{}' is configured but does not match any entry \
+                     in `providers` or any built-in (anthropic/openai/deepseek/glm/gemini/ollama/openrouter). \
+                     Either add it under `providers` or remove the `escalation_provider` setting.",
+                    alias
+                );
+            }
+            (None, _) => {
+                // Default itself isn't resolvable — let the
+                // caller's "no provider" error path handle it.
+            }
+        }
     }
+
+    // Phase 4 part 2 — context-depth reminder wiring.
+    if let Some(threshold) = cfg.resolve_context_depth_threshold() {
+        agent = agent.with_context_depth_reminder(threshold);
+    }
+
+    agent
+}
+
+/// Phase 4 part 1: build a standalone StreamFn for the escalation
+/// route. Constructs a fresh `AnyClient` for the alias, builds an
+/// `AnyModel` against it using either the entry's `model` field or
+/// the provider's default, then wraps with the same tool defs as
+/// the main loop.
+fn build_escalation_stream_fn(
+    alias: &str,
+    entry: &ProviderEntry,
+    providers: &HashMap<String, ProviderEntry>,
+    chunk_timeout: std::time::Duration,
+    loop_tools: &[std::sync::Arc<dyn crate::agent::agent_loop::LoopTool>],
+) -> anyhow::Result<crate::agent::agent_loop::StreamFn> {
+    use crate::agent::agent_loop::loop_tool_to_rig_definition;
+    let client = create_client(alias, None, providers)?;
+    // Resolve the model: prefer the per-entry `model`; fall back to
+    // the provider's default for the resolved provider kind.
+    let model_name = entry
+        .model
+        .clone()
+        .unwrap_or_else(|| default_model_for(alias).to_string());
+    let model = client.completion_model(model_name);
+    let tool_defs: Vec<rig::completion::ToolDefinition> = loop_tools
+        .iter()
+        .map(|t| loop_tool_to_rig_definition(t.as_ref()))
+        .collect();
+    Ok(model.build_stream_fn(tool_defs, chunk_timeout, Some(alias.to_string())))
 }
 
 #[cfg(test)]

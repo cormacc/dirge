@@ -368,6 +368,26 @@ pub struct LoopSpawnConfig {
     /// `dynamic_tool_search` config knob. Carried alongside
     /// `tool_def_filter` for introspection.
     pub dynamic_tool_search: bool,
+
+    /// Phase 4 part 1: alternate stream function used for ONE
+    /// call after a repair-exhaustion or tree-sitter failure.
+    /// `None` when no escalation is configured.
+    pub escalation_stream_fn: Option<StreamFn>,
+
+    /// Phase 4 part 1: provider name for the escalation route.
+    /// Surfaced in `LoopEvent::EscalationActivated` so the UI can
+    /// show the user which provider just took over.
+    pub escalation_provider_name: Option<String>,
+
+    /// Phase 4 part 1: per-session escalation cap. `None` uses the
+    /// hardcoded default of 3.
+    pub escalation_max_per_session: Option<usize>,
+
+    /// Phase 4 part 2: optional file-touch tracker for the
+    /// context-depth reminder system. `None` keeps the feature
+    /// off (legacy behavior, byte-identical to today).
+    pub file_touch_tracker:
+        Option<std::sync::Arc<crate::agent::agent_loop::context_depth::FileTouchTracker>>,
 }
 
 impl LoopSpawnConfig {
@@ -392,6 +412,10 @@ impl LoopSpawnConfig {
             summarize_fn: None,
             tool_def_filter: None,
             dynamic_tool_search: false,
+            escalation_stream_fn: None,
+            escalation_provider_name: None,
+            escalation_max_per_session: None,
+            file_touch_tracker: None,
         }
     }
 }
@@ -441,6 +465,14 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         ),
         tool_def_filter: cfg.tool_def_filter.clone(),
         dynamic_tool_search: cfg.dynamic_tool_search,
+        escalation_stream_fn: cfg.escalation_stream_fn.clone(),
+        escalation_provider_name: cfg.escalation_provider_name.clone(),
+        escalation_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        escalation_max_per_session: cfg.escalation_max_per_session.unwrap_or(3),
+        escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+            cfg.escalation_max_per_session.unwrap_or(3),
+        )),
+        file_touch_tracker: cfg.file_touch_tracker.clone(),
     };
 
     #[cfg(feature = "plugin")]
@@ -935,6 +967,7 @@ mod tests {
             AgentEvent::ContextCompacted { .. } => "ContextCompacted",
             AgentEvent::RetryNotice { .. } => "RetryNotice",
             AgentEvent::RepairStats { .. } => "RepairStats",
+            AgentEvent::EscalationActivated { .. } => "EscalationActivated",
         }
     }
 

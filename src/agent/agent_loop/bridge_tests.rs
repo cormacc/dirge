@@ -599,6 +599,7 @@ fn full_run_event_sequence_translates_correctly() {
             AgentEvent::UserMessage { .. } => "UserMessage",
             AgentEvent::RetryNotice { .. } => "RetryNotice",
             AgentEvent::RepairStats { .. } => "RepairStats",
+            AgentEvent::EscalationActivated { .. } => "EscalationActivated",
         })
         .collect();
     assert_eq!(

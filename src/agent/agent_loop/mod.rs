@@ -22,6 +22,7 @@
 #![allow(unused_imports)]
 
 pub mod bridge;
+pub mod context_depth;
 pub mod context_manager;
 #[cfg(test)]
 mod h7_smoke;
@@ -59,8 +60,8 @@ pub use integration::{
     rig_history_to_loop_messages, rig_message_to_loop_messages, spawn_loop_runner,
 };
 pub use message::{
-    AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason, StreamEvent,
-    TokenUsage, ToolResultMessage, UserMessage,
+    AssistantMessage, ContentBlock, DeltaPhase, EscalationReason, LoopEvent, LoopMessage,
+    StopReason, StreamEvent, TokenUsage, ToolResultMessage, UserMessage,
 };
 #[cfg(feature = "plugin")]
 pub use plugin_hooks::{after_hook_from_plugin_manager, before_hook_from_plugin_manager};

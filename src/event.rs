@@ -171,6 +171,15 @@ pub enum AgentEvent {
     RepairStats {
         snapshot: crate::agent::agent_loop::tool_input_repair::RepairStatsSnapshot,
     },
+    /// Phase 4 part 1 — dual-client tiering: the NEXT LLM call has
+    /// been swapped to the configured escalation provider after a
+    /// repair-exhaustion or tree-sitter syntactic failure. One-shot;
+    /// subsequent calls revert to the default model. The UI surfaces
+    /// this so the user knows about the unexpected provider change.
+    EscalationActivated {
+        provider: CompactString,
+        reason: crate::agent::agent_loop::message::EscalationReason,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -143,6 +143,19 @@ impl EventBridge {
                 vec![AgentEvent::RepairStats { snapshot }]
             }
 
+            LoopEvent::EscalationActivated { provider, reason } => {
+                tracing::info!(
+                    target: "dirge::agent_loop",
+                    provider = %provider,
+                    reason = ?reason,
+                    "dual-client escalation activated for next LLM call",
+                );
+                vec![AgentEvent::EscalationActivated {
+                    provider: CompactString::from(provider),
+                    reason,
+                }]
+            }
+
             LoopEvent::AgentEnd { messages } => {
                 // Phase 4.5h-1: classify the run's terminal state
                 // by inspecting the LAST assistant message:

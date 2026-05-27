@@ -14,10 +14,57 @@ use tokio::sync::mpsc;
 
 use super::hooks::{AfterToolCallContext, BeforeToolCallContext};
 use super::inflight::InflightSet;
-use super::message::{AssistantMessage, ContentBlock, LoopEvent, LoopMessage, ToolResultMessage};
+use super::message::{
+    AssistantMessage, ContentBlock, EscalationReason, LoopEvent, LoopMessage, ToolResultMessage,
+};
 use super::result::LoopToolResult;
 use super::tool::{AbortSignal, LoopTool, LoopToolUpdate};
 use super::types::{Context, LoopConfig};
+
+/// Canonical prefix emitted by
+/// `crate::semantic::syntax_validator::format_errors` when a
+/// tree-sitter pre-write check rejects model-generated code. The
+/// tool dispatcher detects this prefix in error-result content so
+/// it can arm escalation WITHOUT the individual tools needing a
+/// reference to `LoopConfig`. Keep in sync with
+/// `syntax_validator::format_errors`.
+pub(crate) const SYNTAX_CHECK_PREFIX: &str = "Syntax check failed for ";
+
+/// Phase 4 part 1: arm the dual-client escalation for the NEXT
+/// stream call. Decrements `escalation_remaining`; no-ops if the
+/// budget is exhausted (logs at debug). If escalation is unarmed
+/// (no `escalation_stream_fn`), the budget is still decremented —
+/// this is intentional: a misconfigured session shouldn't pretend
+/// to have unlimited escalation budget, and `stream_assistant_response`
+/// will simply observe `pending=Some, escalation_stream_fn=None` and
+/// fall back to the default stream.
+pub(crate) fn try_arm_escalation(config: &LoopConfig, reason: EscalationReason) {
+    use std::sync::atomic::Ordering;
+    // Try to decrement the budget. `fetch_update` lets us peek-and-
+    // decrement atomically; if it returns Err, the budget is zero
+    // and we no-op.
+    let res = config
+        .escalation_remaining
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            if v == 0 { None } else { Some(v - 1) }
+        });
+    if res.is_err() {
+        tracing::debug!(
+            target: "dirge::agent_loop::escalation",
+            cap = %config.escalation_max_per_session,
+            "escalation budget exhausted; skipping arm",
+        );
+        return;
+    }
+    if let Ok(mut guard) = config.escalation_pending.lock() {
+        tracing::debug!(
+            target: "dirge::agent_loop::escalation",
+            reason = ?reason,
+            "escalation armed for next LLM call",
+        );
+        *guard = Some(reason);
+    }
+}
 
 /// Batch return shape. Port of pi `ExecutedToolCallBatch`
 /// (agent-loop.ts:390-393).
@@ -148,6 +195,16 @@ pub async fn execute_tool_calls_sequential(
                 // defaults) to the tool result content so the
                 // model sees the auto-fill in the same turn.
                 prepend_notes_to_result(&mut finalized.result, &notes);
+                // Phase 4 part 1: detect tree-sitter syntactic
+                // failure and arm escalation so the next LLM call
+                // routes through the configured escalation
+                // provider.
+                maybe_arm_escalation_for_syntactic_failure(
+                    config,
+                    tool_call,
+                    &finalized.result,
+                    finalized.is_error,
+                );
                 finalized
                 // _inflight dropped here → inflight.delete fires.
             }
@@ -304,6 +361,15 @@ async fn prepare_tool_call(
                 "tool input invalid after repair pass"
             );
             config.repair_stats.record_invalid();
+            // Phase 4 part 1: repair exhausted — arm escalation
+            // for the next LLM call so a stronger model gets a
+            // chance to emit valid tool args.
+            try_arm_escalation(
+                config,
+                EscalationReason::RepairExhausted {
+                    tool: tool_call.name.clone(),
+                },
+            );
             return PrepareOutcome::Immediate {
                 result: create_error_tool_result(&msg),
                 is_error: true,
@@ -351,6 +417,13 @@ async fn prepare_tool_call(
             result: create_error_tool_result("Operation aborted"),
             is_error: true,
         };
+    }
+
+    // Phase 4 part 2: file-touch tracker — record this prepared
+    // tool call's args BEFORE dispatch so the streak counter is
+    // up-to-date by the next steering-poll point.
+    if let Some(tracker) = &config.file_touch_tracker {
+        tracker.record_tool_call(&tool_call.name, &validated_args);
     }
 
     PrepareOutcome::Prepared {
@@ -565,6 +638,56 @@ async fn wait_for_cancel(signal: AbortSignal) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// Phase 4 part 1: scan an error tool-result for the canonical
+/// tree-sitter syntax-check failure prefix; arm escalation if
+/// found.
+///
+/// Tools (`write` / `edit` / `apply_patch`) return their syntax-
+/// failure as an `Err(String)` whose message starts with
+/// `SYNTAX_CHECK_PREFIX`. The dispatcher converts that into an
+/// error result via `create_error_tool_result(&err)`, which wraps
+/// the string in a `{type: "text", text: ...}` block. We inspect
+/// that block here without coupling the individual tools to
+/// `LoopConfig`.
+pub(crate) fn maybe_arm_escalation_for_syntactic_failure(
+    config: &LoopConfig,
+    tool_call: &ToolCall,
+    result: &LoopToolResult,
+    is_error: bool,
+) {
+    if !is_error {
+        return;
+    }
+    let text = result.content.iter().find_map(|b| {
+        let obj = b.as_object()?;
+        if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+            obj.get("text").and_then(|t| t.as_str())
+        } else {
+            None
+        }
+    });
+    let text = match text {
+        Some(t) => t,
+        None => return,
+    };
+    if !text.starts_with(SYNTAX_CHECK_PREFIX) {
+        return;
+    }
+    // Extract the path between the prefix and the trailing ": N error(s)…".
+    let after = &text[SYNTAX_CHECK_PREFIX.len()..];
+    let path = match after.find(':') {
+        Some(i) => after[..i].to_string(),
+        None => String::new(),
+    };
+    try_arm_escalation(
+        config,
+        EscalationReason::SyntacticFailure {
+            tool: tool_call.name.clone(),
+            path,
+        },
+    );
 }
 
 /// Build the "tool not found" / "operation aborted" / "blocked"
@@ -786,6 +909,17 @@ pub async fn execute_tool_calls_parallel(
                     // Phase-2: prepend repair notes so the model
                     // sees them in the same tool result.
                     prepend_notes_to_result(&mut finalized.result, &notes);
+                    // Phase 4 part 1: detect tree-sitter syntactic
+                    // failure and arm escalation for the next LLM
+                    // call. Uses the SAME config Arc state as the
+                    // sequential path — the cloned LoopConfig
+                    // shares `escalation_pending` / `escalation_remaining`.
+                    maybe_arm_escalation_for_syntactic_failure(
+                        &config_clone,
+                        &tool_call_clone,
+                        &finalized.result,
+                        finalized.is_error,
+                    );
                     // Emit end AT COMPLETION. This is the key
                     // difference from sequential (which emits
                     // end immediately after each call).

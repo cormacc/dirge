@@ -54,6 +54,25 @@ use super::stream::{StreamFn, stream_assistant_response};
 use super::tool::AbortSignal;
 use super::types::{Context, LoopConfig};
 
+/// Phase 4 part 2: poll the configured `get_steering_messages`
+/// hook AND the file-touch tracker (when present), concatenating
+/// their outputs. The tracker reminder follows any queued steering
+/// messages so the user's explicit guidance is observed first.
+///
+/// Kept as a free fn so the inner/outer steering-poll sites stay
+/// terse. Returns an empty Vec when neither source has anything to
+/// inject — preserves the legacy fast path byte-for-byte.
+async fn poll_steering_and_reminder(config: &LoopConfig) -> Vec<LoopMessage> {
+    let mut out = match &config.get_steering_messages {
+        Some(get) => get().await,
+        None => Vec::new(),
+    };
+    if let Some(tracker) = &config.file_touch_tracker {
+        out.extend(tracker.poll_reminder());
+    }
+    out
+}
+
 /// Build a `StormBreaker` from `LoopConfig`, merging custom
 /// mutating/exempt tool name lists with the built-in defaults.
 fn storm_for_config(config: &LoopConfig) -> StormBreaker {
@@ -222,6 +241,12 @@ pub async fn run_agent_loop(
     // Pi line 105: `currentContext.messages = [...context.messages, ...prompts]`.
     for prompt in &prompts {
         context.messages.push(loop_message_to_value(prompt));
+        // Phase 4 part 2: notify the file-touch tracker about user
+        // prompts so it can decide whether the streak persists or
+        // resets to a new topic.
+        if let (Some(tracker), LoopMessage::User(u)) = (&config.file_touch_tracker, prompt) {
+            tracker.record_user_message(&u.content);
+        }
     }
 
     // Pi lines 109-114: emit agent_start + turn_start + per-prompt
@@ -295,10 +320,9 @@ pub async fn run_loop(
     let mut folded_this_turn: bool;
 
     // Pi line 167: initial steering poll.
-    let mut pending_messages: Vec<LoopMessage> = match &config.get_steering_messages {
-        Some(get) => get().await,
-        None => Vec::new(),
-    };
+    // Phase 4 part 2: composes with the file-touch tracker's
+    // reminder poll when configured.
+    let mut pending_messages: Vec<LoopMessage> = poll_steering_and_reminder(&config).await;
 
     'outer: loop {
         // Storm: fresh intent on each new user turn.
@@ -376,6 +400,18 @@ pub async fn run_loop(
                         .await;
                     current_context.messages.push(loop_message_to_value(msg));
                     new_messages.push(msg.clone());
+                    // Phase 4 part 2: record user-originated steering
+                    // messages so the file-touch tracker can decide
+                    // whether the streak survives the new prompt.
+                    // The tracker's OWN reminder message contains
+                    // "[Context-depth reminder]" — skip recording
+                    // those so they don't reset the streak they just
+                    // diagnosed.
+                    if let (Some(tracker), LoopMessage::User(u)) = (&config.file_touch_tracker, msg)
+                        && !u.content.contains("[Context-depth reminder]")
+                    {
+                        tracker.record_user_message(&u.content);
+                    }
                 }
                 pending_messages.clear();
             }
@@ -714,10 +750,8 @@ pub async fn run_loop(
             }
 
             // Pi line 253: refresh steering for next iteration.
-            pending_messages = match &config.get_steering_messages {
-                Some(get) => get().await,
-                None => Vec::new(),
-            };
+            // Phase 4 part 2: also polls the file-touch tracker.
+            pending_messages = poll_steering_and_reminder(&config).await;
         }
         // INNER END
 

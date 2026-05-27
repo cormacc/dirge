@@ -2144,6 +2144,18 @@ pub async fn run_interactive(
                         renderer.write_line("", Color::White)?;
                         // session.add_message handled at input time (line ~2119)
                     }
+                    AgentEvent::EscalationActivated { provider, reason } => {
+                        // Phase 4 part 1: surface the dual-client
+                        // model swap as a single dim status line so
+                        // the user sees the unexpected provider
+                        // takeover (see docs/AGENTIC_LOOP_PLAN.md
+                        // "Risk + sequencing notes").
+                        let summary = reason.summary();
+                        renderer.write_line(
+                            &format!("  ↑ escalating to {provider} (next turn): {summary}"),
+                            theme::dim(),
+                        )?;
+                    }
                     AgentEvent::RetryNotice {
                         attempt,
                         delay_ms,

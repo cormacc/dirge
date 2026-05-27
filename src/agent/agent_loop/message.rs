@@ -396,6 +396,52 @@ pub enum LoopEvent {
     RepairStats {
         snapshot: super::tool_input_repair::RepairStatsSnapshot,
     },
+
+    /// Phase 4 part 1: dual-client escalation has been activated for
+    /// the next LLM call. Emitted just before the swap fires, so the
+    /// UI can surface the change-of-model to the user (avoids
+    /// surprise token spend per `docs/AGENTIC_LOOP_PLAN.md` §"Risk").
+    EscalationActivated {
+        /// Provider alias the escalation routes to (e.g.
+        /// `"anthropic"`, `"deepseek-pro"`). Empty string is
+        /// permitted but the UI will surface a generic label.
+        provider: String,
+        /// What triggered the escalation. Carried so the UI / log
+        /// can show the cause inline with the activation.
+        reason: EscalationReason,
+    },
+}
+
+/// Phase 4 part 1: cause of an escalation. Surfaced in the
+/// `LoopEvent::EscalationActivated` event and forwarded into the UI
+/// so the user sees WHY the escalation fired without having to
+/// cross-reference tracing logs.
+#[derive(Debug, Clone)]
+pub enum EscalationReason {
+    /// Tool-input repair attempted every available kind and the
+    /// final args still failed schema validation. Carries the
+    /// tool name for the UI / log.
+    RepairExhausted { tool: String },
+    /// Tree-sitter syntactic validation rejected the model's
+    /// generated code in a `write` / `edit` / `apply_patch` tool
+    /// call. Carries the tool name and the path the failure
+    /// targeted.
+    SyntacticFailure { tool: String, path: String },
+}
+
+impl EscalationReason {
+    /// One-line human-readable summary for the UI. Kept compact so
+    /// it fits on a status line.
+    pub fn summary(&self) -> String {
+        match self {
+            EscalationReason::RepairExhausted { tool } => {
+                format!("repair exhausted for {tool}")
+            }
+            EscalationReason::SyntacticFailure { tool, path } => {
+                format!("syntax check failed in {tool} ({path})")
+            }
+        }
+    }
 }
 
 impl LoopEvent {
@@ -418,6 +464,7 @@ impl LoopEvent {
             LoopEvent::ContextCompacted { .. } => "context_compacted",
             LoopEvent::RetryNotice { .. } => "retry_notice",
             LoopEvent::RepairStats { .. } => "repair_stats",
+            LoopEvent::EscalationActivated { .. } => "escalation_activated",
         }
     }
 }
