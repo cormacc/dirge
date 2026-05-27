@@ -340,12 +340,10 @@ fn serialize_conversation_returns_full_prefix() {
 fn custom_provider_https_is_allowed() {
     let custom = std::collections::HashMap::from([(
         "my-proxy".to_string(),
-        CustomProviderConfig {
-            provider_type: "custom".to_string(),
-            base_url: "https://my-proxy.example.com/v1".to_string(),
-            api_key_env: None,
-            allow_insecure: false,
-            stream_chunk_timeout_secs: None,
+        ProviderEntry {
+            provider_type: Some("custom".to_string()),
+            base_url: Some("https://my-proxy.example.com/v1".to_string()),
+            ..Default::default()
         },
     )]);
     let result = resolve_provider_info("my-proxy", &custom);
@@ -357,12 +355,10 @@ fn custom_provider_https_is_allowed() {
 fn custom_provider_http_rejected_without_allow_insecure() {
     let custom = std::collections::HashMap::from([(
         "bad-proxy".to_string(),
-        CustomProviderConfig {
-            provider_type: "custom".to_string(),
-            base_url: "http://bad-proxy.example.com/v1".to_string(),
-            api_key_env: None,
-            allow_insecure: false,
-            stream_chunk_timeout_secs: None,
+        ProviderEntry {
+            provider_type: Some("custom".to_string()),
+            base_url: Some("http://bad-proxy.example.com/v1".to_string()),
+            ..Default::default()
         },
     )]);
     let result = resolve_provider_info("bad-proxy", &custom);
@@ -377,12 +373,11 @@ fn custom_provider_http_rejected_without_allow_insecure() {
 fn custom_provider_http_allowed_with_allow_insecure() {
     let custom = std::collections::HashMap::from([(
         "local-ollama".to_string(),
-        CustomProviderConfig {
-            provider_type: "custom".to_string(),
-            base_url: "http://localhost:11434/v1".to_string(),
-            api_key_env: None,
+        ProviderEntry {
+            provider_type: Some("custom".to_string()),
+            base_url: Some("http://localhost:11434/v1".to_string()),
             allow_insecure: true,
-            stream_chunk_timeout_secs: None,
+            ..Default::default()
         },
     )]);
     let result = resolve_provider_info("local-ollama", &custom);
@@ -395,15 +390,14 @@ fn custom_provider_http_allowed_with_allow_insecure() {
 /// Custom provider name colliding with built-in is rejected.
 #[test]
 fn custom_provider_builtin_name_collision_rejected() {
-    // Plugin tries to shadow "openai".
+    // Plugin tries to shadow "openai" with an explicit different
+    // backend type and base_url.
     let custom = std::collections::HashMap::from([(
         "openai".to_string(),
-        CustomProviderConfig {
-            provider_type: "custom".to_string(),
-            base_url: "https://evil.example.com/v1".to_string(),
-            api_key_env: None,
-            allow_insecure: false,
-            stream_chunk_timeout_secs: None,
+        ProviderEntry {
+            provider_type: Some("custom".to_string()),
+            base_url: Some("https://evil.example.com/v1".to_string()),
+            ..Default::default()
         },
     )]);
     let result = resolve_provider_info("openai", &custom);

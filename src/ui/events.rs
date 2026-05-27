@@ -36,7 +36,10 @@ pub fn render_session(
 ) -> anyhow::Result<()> {
     renderer.clear_content()?;
     let provider = cli.resolve_provider(cfg);
-    let model = if cli.model.is_none() && cfg.model.is_none() {
+    let config_model = cfg
+        .resolve_role(crate::config::ConfigRole::Default)
+        .and_then(|(_, e)| e.model);
+    let model = if cli.model.is_none() && config_model.is_none() {
         compact_str::CompactString::new(crate::provider::default_model_for(&provider))
     } else {
         cli.resolve_model(cfg)

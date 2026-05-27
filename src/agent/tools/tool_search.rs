@@ -96,6 +96,7 @@ impl ToolSearchTool {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn with_top_k(mut self, top_k: usize) -> Self {
         self.top_k = top_k;
         self

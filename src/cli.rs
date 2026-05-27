@@ -224,11 +224,15 @@ pub struct Cli {
 
 impl Cli {
     pub fn resolve_model(&self, cfg: &config::Config) -> CompactString {
-        self.model
-            .as_deref()
-            .or(cfg.model.as_deref())
-            .map(CompactString::new)
-            .unwrap_or_else(|| CompactString::new("deepseek/deepseek-v4-flash"))
+        if let Some(m) = self.model.as_deref() {
+            return CompactString::new(m);
+        }
+        if let Some((_, entry)) = cfg.resolve_role(config::ConfigRole::Default)
+            && let Some(m) = entry.model
+        {
+            return CompactString::new(m);
+        }
+        CompactString::new("deepseek/deepseek-v4-flash")
     }
 
     pub fn resolve_provider(&self, cfg: &config::Config) -> CompactString {

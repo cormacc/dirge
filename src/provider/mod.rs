@@ -16,7 +16,7 @@ use crate::agent::tools::ToolCache;
 use crate::agent::tools::plan::PlanSwitchSender;
 use crate::agent::tools::question::QuestionSender;
 use crate::cli::Cli;
-use crate::config::{Config, CustomProviderConfig};
+use crate::config::{Config, ProviderEntry};
 use crate::context::ContextFiles;
 use crate::event::AgentEvent;
 #[cfg(feature = "mcp")]
@@ -82,21 +82,25 @@ pub struct ProviderInfo {
 
 pub fn resolve_provider_info(
     name: &str,
-    custom_providers: &HashMap<String, CustomProviderConfig>,
+    providers: &HashMap<String, ProviderEntry>,
 ) -> Option<ProviderInfo> {
-    // Config-declared custom providers win on name collision —
-    // user intent always trumps plugin defaults.
+    // Config-declared providers win on name collision — user intent
+    // always trumps plugin defaults.
     // #2 fix: lowercase-fallback lookup so `--provider My-VLLM` finds
-    // a `custom_providers["my-vllm"]` config entry. parse_provider
+    // a `providers["my-vllm"]` config entry. parse_provider
     // (for built-ins) is already case-insensitive; matching the same
     // convention here removes a silent miss.
     let lower = name.to_ascii_lowercase();
-    if let Some(custom) = custom_providers
-        .get(name)
-        .or_else(|| custom_providers.get(&lower))
-    {
-        let kind = parse_provider(&custom.provider_type)?;
-        if let Err(err) = validate_custom_provider(name, &custom.base_url, custom.allow_insecure) {
+    if let Some(entry) = providers.get(name).or_else(|| providers.get(&lower)) {
+        let ptype = Config::provider_type_of(name, entry);
+        let kind = parse_provider(&ptype)?;
+        // Only enforce URL safety when the entry actually carries
+        // a base_url. Built-in providers (e.g. `"deepseek": {}`)
+        // legitimately have no base_url — they fall through to the
+        // provider's default endpoint.
+        if let Some(url) = entry.base_url.as_deref()
+            && let Err(err) = validate_custom_provider(name, url, entry.allow_insecure)
+        {
             tracing::error!(
                 target: "dirge::provider",
                 "{err}"
@@ -106,16 +110,19 @@ pub fn resolve_provider_info(
         }
         return Some(ProviderInfo {
             kind,
-            base_url: Some(custom.base_url.clone()),
-            api_key_env: custom.api_key_env.clone(),
+            base_url: entry.base_url.clone(),
+            api_key_env: entry.api_key_env.clone(),
         });
     }
     // Then plugin-registered providers from `harness/register-provider`.
     // Installed once at startup after plugin load; never mutated again
     // in this process.
-    if let Some(custom) = plugin_provider(name).or_else(|| plugin_provider(&lower)) {
-        let kind = parse_provider(&custom.provider_type)?;
-        if let Err(err) = validate_custom_provider(name, &custom.base_url, custom.allow_insecure) {
+    if let Some(entry) = plugin_provider(name).or_else(|| plugin_provider(&lower)) {
+        let ptype = Config::provider_type_of(name, &entry);
+        let kind = parse_provider(&ptype)?;
+        if let Some(url) = entry.base_url.as_deref()
+            && let Err(err) = validate_custom_provider(name, url, entry.allow_insecure)
+        {
             tracing::error!(
                 target: "dirge::provider",
                 "{err}"
@@ -125,8 +132,8 @@ pub fn resolve_provider_info(
         }
         return Some(ProviderInfo {
             kind,
-            base_url: Some(custom.base_url),
-            api_key_env: custom.api_key_env,
+            base_url: entry.base_url,
+            api_key_env: entry.api_key_env,
         });
     }
     let kind = parse_provider(name)?;
@@ -250,7 +257,7 @@ fn looks_like_local_host(base_url: &str) -> bool {
 /// after plugin load. Stored separately from `cfg.custom_providers`
 /// so a `/reload` (future) can swap plugin providers without
 /// disturbing the user's persistent config.
-static PLUGIN_PROVIDERS: OnceLock<HashMap<String, CustomProviderConfig>> = OnceLock::new();
+static PLUGIN_PROVIDERS: OnceLock<HashMap<String, ProviderEntry>> = OnceLock::new();
 
 /// Install the plugin-registered provider map. Only the first call
 /// wins (OnceLock semantics) — sufficient for current behavior where
@@ -258,13 +265,13 @@ static PLUGIN_PROVIDERS: OnceLock<HashMap<String, CustomProviderConfig>> = OnceL
 /// Returns the installed-or-already-installed map size so callers
 /// can log a confirmation.
 #[cfg_attr(not(feature = "plugin"), allow(dead_code))]
-pub fn install_plugin_providers(map: HashMap<String, CustomProviderConfig>) -> usize {
+pub fn install_plugin_providers(map: HashMap<String, ProviderEntry>) -> usize {
     let size = map.len();
     let _ = PLUGIN_PROVIDERS.set(map);
     size
 }
 
-fn plugin_provider(name: &str) -> Option<CustomProviderConfig> {
+fn plugin_provider(name: &str) -> Option<ProviderEntry> {
     PLUGIN_PROVIDERS.get().and_then(|m| m.get(name).cloned())
 }
 
@@ -1100,9 +1107,9 @@ impl AnyAgent {
 pub fn create_client(
     provider_name: &str,
     api_key: Option<&str>,
-    custom_providers: &HashMap<String, CustomProviderConfig>,
+    providers: &HashMap<String, ProviderEntry>,
 ) -> anyhow::Result<AnyClient> {
-    client::create_client(provider_name, api_key, custom_providers)
+    client::create_client(provider_name, api_key, providers)
 }
 
 pub async fn build_agent(

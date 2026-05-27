@@ -10,16 +10,16 @@ use std::collections::HashMap;
 
 use rig::providers::{anthropic, gemini, ollama, openai, openrouter};
 
-use crate::config::CustomProviderConfig;
+use crate::config::ProviderEntry;
 
 use super::{AnyClient, ProviderKind, resolve_api_key, resolve_provider_info};
 
 pub(crate) fn create_client(
     provider_name: &str,
     api_key: Option<&str>,
-    custom_providers: &HashMap<String, CustomProviderConfig>,
+    providers: &HashMap<String, ProviderEntry>,
 ) -> anyhow::Result<AnyClient> {
-    let info = resolve_provider_info(provider_name, custom_providers).ok_or_else(|| {
+    let info = resolve_provider_info(provider_name, providers).ok_or_else(|| {
         anyhow::anyhow!(
             "Unknown provider: {}. Supported providers: openrouter, openai, anthropic, gemini, deepseek, glm, ollama, custom",
             provider_name

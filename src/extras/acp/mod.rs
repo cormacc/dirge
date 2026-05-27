@@ -145,15 +145,18 @@ async fn run_prompt(
     cx: ConnectionTo<Client>,
 ) -> Result<(), agent_client_protocol::Error> {
     let provider_str = state.cli.resolve_provider(&state.cfg);
-    let model_str = if state.cli.model.is_none() && state.cfg.model.is_none() {
+    let config_model = state
+        .cfg
+        .resolve_role(crate::config::ConfigRole::Default)
+        .and_then(|(_, e)| e.model);
+    let model_str = if state.cli.model.is_none() && config_model.is_none() {
         compact_str::CompactString::new(crate::provider::default_model_for(&provider_str))
     } else {
         state.cli.resolve_model(&state.cfg)
     };
 
-    let client =
-        crate::provider::create_client(&provider_str, None, &state.cfg.custom_providers_map())
-            .map_err(|e| agent_client_protocol::Error::new(-32603, e.to_string()))?;
+    let client = crate::provider::create_client(&provider_str, None, &state.cfg.providers_map())
+        .map_err(|e| agent_client_protocol::Error::new(-32603, e.to_string()))?;
 
     let model = client.completion_model(model_str.to_string());
 

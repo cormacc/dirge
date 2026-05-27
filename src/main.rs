@@ -372,7 +372,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let provider = cli.resolve_provider(&cfg);
-    let model = if cli.model.is_none() && cfg.model.is_none() {
+    let config_model = cfg
+        .resolve_role(config::ConfigRole::Default)
+        .and_then(|(_, e)| e.model);
+    let model = if cli.model.is_none() && config_model.is_none() {
         CompactString::new(provider::default_model_for(&provider))
     } else {
         cli.resolve_model(&cfg)
@@ -609,16 +612,17 @@ async fn main() -> anyhow::Result<()> {
         // registered via `harness/register-provider` and install them
         // into the global provider resolver. Config-declared
         // custom_providers still take precedence on name collision.
-        let plugin_providers: std::collections::HashMap<String, config::CustomProviderConfig> = {
+        let plugin_providers: std::collections::HashMap<String, config::ProviderEntry> = {
             let mut mgr = pm_arc.lock().unwrap_or_else(|e| e.into_inner());
             mgr.list_providers()
                 .into_iter()
                 .map(|(name, ptype, base_url, api_key_env)| {
                     (
                         name,
-                        config::CustomProviderConfig {
-                            provider_type: ptype,
-                            base_url,
+                        config::ProviderEntry {
+                            provider_type: Some(ptype),
+                            base_url: Some(base_url),
+                            model: None,
                             api_key_env,
                             // Plugin-registered providers don't expose
                             // a chunk-timeout knob via the
@@ -679,11 +683,7 @@ async fn main() -> anyhow::Result<()> {
         cli.api_key.clone()
     };
 
-    let client = provider::create_client(
-        &provider,
-        resolved_key.as_deref(),
-        &cfg.custom_providers_map(),
-    )?;
+    let client = provider::create_client(&provider, resolved_key.as_deref(), &cfg.providers_map())?;
 
     #[cfg(feature = "mcp")]
     let mcp_manager = if let Some(servers) = &cfg.mcp_servers {

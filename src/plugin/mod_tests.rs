@@ -1592,7 +1592,7 @@ fn test_register_provider_ignores_non_string_args() {
 #[cfg(feature = "plugin")]
 #[test]
 fn test_plugin_provider_visible_through_resolve_provider_info() {
-    use crate::config::CustomProviderConfig;
+    use crate::config::ProviderEntry;
     use std::collections::HashMap;
 
     // We can only install the global once per process. Use a unique
@@ -1600,16 +1600,16 @@ fn test_plugin_provider_visible_through_resolve_provider_info() {
     // first or alongside other tests that also install. OnceLock's
     // set returns Err on second call but doesn't panic; we tolerate
     // that and check the result post-install.
-    let mut map: HashMap<String, CustomProviderConfig> = HashMap::new();
+    let mut map: HashMap<String, ProviderEntry> = HashMap::new();
     map.insert(
         "test-plugin-provider".to_string(),
-        CustomProviderConfig {
-            provider_type: "openai".to_string(),
-            base_url: "http://plugin-test.invalid/v1".to_string(),
+        ProviderEntry {
+            provider_type: Some("openai".to_string()),
+            base_url: Some("http://plugin-test.invalid/v1".to_string()),
             api_key_env: Some("PLUGIN_TEST_KEY".to_string()),
-            stream_chunk_timeout_secs: None,
             // test URL is http (not https) — must opt into insecure
             allow_insecure: true,
+            ..Default::default()
         },
     );
     // Best-effort install — OnceLock may already be set from
@@ -1617,7 +1617,7 @@ fn test_plugin_provider_visible_through_resolve_provider_info() {
     // can't observe a fresh install.
     crate::provider::install_plugin_providers(map);
 
-    let cfg_providers: HashMap<String, CustomProviderConfig> = HashMap::new();
+    let cfg_providers: HashMap<String, ProviderEntry> = HashMap::new();
     if let Some(info) =
         crate::provider::resolve_provider_info("test-plugin-provider", &cfg_providers)
     {
@@ -1637,19 +1637,18 @@ fn test_plugin_provider_visible_through_resolve_provider_info() {
 #[cfg(feature = "plugin")]
 #[test]
 fn test_config_provider_overrides_plugin_provider() {
-    use crate::config::CustomProviderConfig;
+    use crate::config::ProviderEntry;
     use std::collections::HashMap;
 
-    let mut cfg_providers: HashMap<String, CustomProviderConfig> = HashMap::new();
+    let mut cfg_providers: HashMap<String, ProviderEntry> = HashMap::new();
     cfg_providers.insert(
         "shadowed".to_string(),
-        CustomProviderConfig {
-            provider_type: "openai".to_string(),
-            base_url: "http://from-config".to_string(),
-            api_key_env: None,
-            stream_chunk_timeout_secs: None,
+        ProviderEntry {
+            provider_type: Some("openai".to_string()),
+            base_url: Some("http://from-config".to_string()),
             // test URL is http — opt into insecure
             allow_insecure: true,
+            ..Default::default()
         },
     );
     // Even if the plugin global also has "shadowed", config wins

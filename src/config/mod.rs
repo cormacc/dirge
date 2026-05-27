@@ -11,38 +11,55 @@ use crate::extras::mcp::config::McpServerConfig;
 #[cfg(feature = "acp")]
 use crate::extras::acp::config::AcpServerConfig;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct CustomProviderConfig {
-    pub provider_type: String,
-    pub base_url: String,
+/// Unified provider declaration. One entry per alias in
+/// `config.providers`. The map KEY is the alias the rest of the
+/// config (and `provider`, `review_provider`, etc.) refers to.
+///
+/// `provider_type` is optional: when the alias matches a built-in
+/// (anthropic, deepseek, glm, openai, openrouter, gemini, ollama),
+/// it's inferred from the key. Set it explicitly only when aliasing
+/// a built-in backend under a different name — e.g.
+/// `"ollama": { "provider_type": "openai", "base_url": "..." }`
+/// aliases the OpenAI-compatible backend under the alias `ollama`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProviderEntry {
+    pub provider_type: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
     pub api_key_env: Option<String>,
     /// Set to true to allow `http://` URLs (insecure). Default false —
     /// only `https://` is accepted. Non-https endpoints send every
     /// prompt, file content, and tool result in plaintext over the
     /// network. Only enable for local-only proxies (ollama, vllm, etc.)
     /// that are NOT reachable from other hosts.
-    #[serde(default)]
     pub allow_insecure: bool,
     /// Per-provider override for the streaming chunk timeout. Same
     /// units / semantics as the top-level `stream_chunk_timeout_secs`
-    /// but takes precedence for this specific provider. Useful when
-    /// one custom endpoint (e.g. a self-hosted reasoning model) needs
-    /// a generous gap and others should fail faster.
+    /// but takes precedence for this specific provider.
     pub stream_chunk_timeout_secs: Option<u64>,
 }
 
-/// Per-provider tuning knobs that apply to a built-in provider name
-/// (anthropic, openai, openrouter, gemini, deepseek, glm, ollama).
-/// Keyed by `providers.<name>` in config.json. Currently carries
-/// only the chunk timeout; expand as more per-provider knobs land.
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(default)]
-pub struct ProviderSettings {
-    /// Override the streaming chunk timeout for this provider.
-    /// Precedence: this > top-level `stream_chunk_timeout_secs` >
-    /// default 300s. Useful e.g. for Anthropic extended-thinking
-    /// runs that legitimately exceed the 5-minute default.
-    pub stream_chunk_timeout_secs: Option<u64>,
+/// Logical role a provider can be assigned to. Used by
+/// `Config::resolve_role` to look up the named provider for that
+/// role (and fall back to the default for non-default roles).
+///
+/// `Review`, `Escalation`, `Summarization`, and `Subagent` are
+/// declared for the unified role-routing surface; the
+/// corresponding call-sites (background review, Phase 4
+/// escalation, compaction summarizer, `task` subagent) wire up in
+/// follow-up commits. They're tested today via the role
+/// resolver but not yet referenced from a runtime path, so
+/// `#[allow(dead_code)]` keeps the warning quiet for the
+/// config-only PR.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum ConfigRole {
+    Default,
+    Review,
+    Escalation,
+    Summarization,
+    Subagent,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -132,7 +149,6 @@ impl LspConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub model: Option<String>,
     pub provider: Option<String>,
     pub max_tokens: Option<u64>,
     pub temperature: Option<f64>,
@@ -143,12 +159,12 @@ pub struct Config {
     pub keep_recent_tokens: Option<u64>,
     pub max_agent_turns: Option<usize>,
     pub compact_enabled: Option<bool>,
-    pub custom_providers: Option<HashMap<String, CustomProviderConfig>>,
-    /// Per-built-in-provider tuning. Keyed by provider name
-    /// (`anthropic`, `openai`, `openrouter`, `gemini`, `deepseek`,
-    /// `glm`, `ollama`). Currently only the chunk timeout; expand
-    /// as more knobs land.
-    pub providers: Option<HashMap<String, ProviderSettings>>,
+    /// Unified provider map. Keyed by alias; the alias is what
+    /// `provider` / `review_provider` / `escalation_provider` /
+    /// `summarization_provider` / `subagent_provider` reference.
+    /// Each entry's `provider_type` defaults to the alias key
+    /// when omitted.
+    pub providers: Option<HashMap<String, ProviderEntry>>,
     pub permission: Option<serde_json::Value>,
     pub restrictive: Option<bool>,
     pub accept_all: Option<bool>,
@@ -177,10 +193,12 @@ pub struct Config {
     /// Optional provider to use for background review at session end.
     /// When not set, the review fork reuses the main session's provider.
     pub review_provider: Option<String>,
-    /// Optional model to use for background review. Falls back to the
-    /// main model when not set. Useful for routing review work to a
-    /// cheaper/faster model.
-    pub review_model: Option<String>,
+    /// Optional provider for escalation (Phase 4 future hook).
+    pub escalation_provider: Option<String>,
+    /// Optional provider for context summarization / compaction.
+    pub summarization_provider: Option<String>,
+    /// Optional provider for sub-agents (`task` tool).
+    pub subagent_provider: Option<String>,
     /// UI color theme. Known built-in values: `phosphor` (default,
     /// 80s CRT green) and `plain` (white/cyan).
     ///
@@ -217,8 +235,58 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn custom_providers_map(&self) -> HashMap<String, CustomProviderConfig> {
-        self.custom_providers.clone().unwrap_or_default()
+    /// Snapshot of the unified providers map. Empty when not set.
+    pub fn providers_map(&self) -> HashMap<String, ProviderEntry> {
+        self.providers.clone().unwrap_or_default()
+    }
+
+    /// Resolve a logical role to `(alias, entry)`. For non-default
+    /// roles, falls back to `self.provider` when no role-specific
+    /// assignment is configured. Returns `None` only when neither
+    /// the role nor the default provider names a present entry,
+    /// AND the alias doesn't match a built-in.
+    pub fn resolve_role(&self, role: ConfigRole) -> Option<(String, ProviderEntry)> {
+        let providers = self.providers.as_ref();
+        let role_name: Option<&str> = match role {
+            ConfigRole::Default => self.provider.as_deref(),
+            ConfigRole::Review => self.review_provider.as_deref().or(self.provider.as_deref()),
+            ConfigRole::Escalation => self
+                .escalation_provider
+                .as_deref()
+                .or(self.provider.as_deref()),
+            ConfigRole::Summarization => self
+                .summarization_provider
+                .as_deref()
+                .or(self.provider.as_deref()),
+            ConfigRole::Subagent => self
+                .subagent_provider
+                .as_deref()
+                .or(self.provider.as_deref()),
+        };
+        let alias = role_name?.to_string();
+        if let Some(map) = providers
+            && let Some(entry) = map
+                .get(&alias)
+                .or_else(|| map.get(&alias.to_ascii_lowercase()))
+        {
+            return Some((alias, entry.clone()));
+        }
+        // Alias names a built-in but no explicit entry: synthesize a
+        // default entry so callers don't have to special-case.
+        if crate::provider::parse_provider(&alias).is_some() {
+            return Some((alias, ProviderEntry::default()));
+        }
+        None
+    }
+
+    /// Resolve the provider_type for an entry — the entry's
+    /// explicit value when set, otherwise the alias (lowercased)
+    /// which must match a built-in.
+    pub fn provider_type_of(name: &str, entry: &ProviderEntry) -> String {
+        entry
+            .provider_type
+            .clone()
+            .unwrap_or_else(|| name.to_ascii_lowercase())
     }
 
     /// Resolve the context window for the active model. Precedence:
@@ -263,31 +331,24 @@ impl Config {
     /// Resolve the chunk timeout for the active provider.
     ///
     /// Precedence:
-    ///   1. `custom_providers[name].stream_chunk_timeout_secs`
-    ///   2. `providers[name].stream_chunk_timeout_secs`
-    ///   3. top-level `stream_chunk_timeout_secs`
-    ///   4. `DEFAULT_STREAM_CHUNK_TIMEOUT_SECS` (300s)
+    ///   1. `providers[name].stream_chunk_timeout_secs`
+    ///   2. top-level `stream_chunk_timeout_secs`
+    ///   3. `DEFAULT_STREAM_CHUNK_TIMEOUT_SECS` (300s)
     ///
     /// Passing an unknown / empty provider name falls through past
-    /// (1) and (2) to the top-level / default.
+    /// (1) to the top-level / default.
     pub fn resolve_stream_chunk_timeout(&self, provider: &str) -> std::time::Duration {
         // Provider lookup is case-insensitive because `parse_provider`
         // accepts `--provider Anthropic` (#2 fix). Without this, a
         // capitalized CLI / config provider name built the client
         // fine but missed the `providers.anthropic` override silently.
         let lower = provider.to_ascii_lowercase();
-        let from_custom = self
-            .custom_providers
-            .as_ref()
-            .and_then(|m| m.get(&lower).or_else(|| m.get(provider)))
-            .and_then(|c| c.stream_chunk_timeout_secs);
         let from_provider = self
             .providers
             .as_ref()
-            .and_then(|m| m.get(&lower).or_else(|| m.get(provider)))
+            .and_then(|m| m.get(provider).or_else(|| m.get(&lower)))
             .and_then(|p| p.stream_chunk_timeout_secs);
-        let secs = from_custom
-            .or(from_provider)
+        let secs = from_provider
             .or(self.stream_chunk_timeout_secs)
             .unwrap_or(crate::agent::runner::DEFAULT_STREAM_CHUNK_TIMEOUT_SECS);
         std::time::Duration::from_secs(secs)
@@ -390,6 +451,40 @@ pub fn load() -> Config {
             );
             std::process::exit(1);
         });
+
+        // Reject legacy config shape BEFORE deserialising. The old
+        // shape used top-level `model`, `review_model`, and
+        // `custom_providers`; all three have moved into
+        // `providers.<alias>.{model,...}` (with role assignments via
+        // `review_provider`, etc.). Surface a clear migration hint
+        // rather than silently dropping fields.
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(obj) = raw.as_object()
+        {
+            const LEGACY: &[&str] = &["custom_providers", "model", "review_model"];
+            let found: Vec<&str> = LEGACY
+                .iter()
+                .copied()
+                .filter(|k| obj.contains_key(*k))
+                .collect();
+            if !found.is_empty() {
+                eprintln!(
+                    "error: legacy config keys found in {}: {:?}",
+                    path.display(),
+                    found,
+                );
+                eprintln!("Migrate to the unified `providers` map:");
+                eprintln!("  - top-level `model`         -> `providers.<active-provider>.model`");
+                eprintln!("  - `custom_providers.X`      -> `providers.X`");
+                eprintln!("  - top-level `review_model`  -> `providers.<review-provider>.model`");
+                eprintln!(
+                    "Then optionally set `review_provider`, `escalation_provider`, \
+                     `summarization_provider`, `subagent_provider`."
+                );
+                std::process::exit(2);
+            }
+        }
+
         serde_json::from_str(&content).unwrap_or_else(|e| {
             eprintln!(
                 "error: {} is not a valid config: {}\n\
@@ -401,18 +496,21 @@ pub fn load() -> Config {
         })
     };
 
-    // Validate `custom_providers` at load time so a typo in
-    // `provider_type` surfaces immediately instead of failing at
-    // first agent call with a cryptic "unknown provider" deep in the
-    // call stack.
-    if let Some(providers) = cfg.custom_providers.as_ref() {
+    // Validate `providers` at load time so a typo in
+    // `provider_type` (or an alias that doesn't match a built-in
+    // and has no explicit provider_type) surfaces immediately
+    // instead of failing at first agent call with a cryptic
+    // "unknown provider" deep in the call stack.
+    if let Some(providers) = cfg.providers.as_ref() {
         for (name, p) in providers {
-            if crate::provider::parse_provider(&p.provider_type).is_none() {
+            let ptype = Config::provider_type_of(name, p);
+            if crate::provider::parse_provider(&ptype).is_none() {
                 eprintln!(
-                    "error: custom provider {:?} has invalid provider_type {:?}.\n\
-                     Must be one of: openrouter, openai, anthropic, gemini,\n\
-                     deepseek, glm, ollama, custom.",
-                    name, p.provider_type,
+                    "error: provider {:?} has invalid provider_type {:?}.\n\
+                     Either the alias must match a built-in (openrouter, openai,\n\
+                     anthropic, gemini, deepseek, glm, ollama, custom) or set\n\
+                     `provider_type` explicitly to one of those.",
+                    name, ptype,
                 );
                 std::process::exit(1);
             }
@@ -487,7 +585,7 @@ mod tests {
     // Config-side, an absent value parses to `None`.
     #[test]
     fn absent_lsp_config_is_none() {
-        let cfg: Config = serde_json::from_str(r#"{"model": "foo"}"#).unwrap();
+        let cfg: Config = serde_json::from_str(r#"{"provider": "deepseek"}"#).unwrap();
         assert!(cfg.lsp.is_none());
     }
 
@@ -578,5 +676,157 @@ mod model_context_tests {
     fn fallback_default_is_128k() {
         let cfg = Config::default();
         assert_eq!(cfg.resolve_context_window("unknown-model-9000"), 128_000);
+    }
+}
+
+#[cfg(test)]
+mod provider_role_tests {
+    use super::*;
+
+    fn cfg_with_providers(json: &str) -> Config {
+        serde_json::from_str(json).expect("parses")
+    }
+
+    #[test]
+    fn resolve_role_default_returns_provider_entry() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "provider": "deepseek",
+                "providers": { "deepseek": { "model": "deepseek-v4-pro" } }
+            }"#,
+        );
+        let (name, entry) = cfg.resolve_role(ConfigRole::Default).unwrap();
+        assert_eq!(name, "deepseek");
+        assert_eq!(entry.model.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn resolve_role_review_falls_back_to_default_provider() {
+        // No review_provider set — review should fall back to the
+        // active provider's entry.
+        let cfg = cfg_with_providers(
+            r#"{
+                "provider": "deepseek",
+                "providers": { "deepseek": { "model": "deepseek-v4-pro" } }
+            }"#,
+        );
+        let (name, entry) = cfg.resolve_role(ConfigRole::Review).unwrap();
+        assert_eq!(name, "deepseek");
+        assert_eq!(entry.model.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn resolve_role_review_uses_explicit_assignment() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "provider": "deepseek",
+                "review_provider": "glm",
+                "providers": {
+                    "deepseek": { "model": "deepseek-v4-pro" },
+                    "glm": { "model": "glm-4.6" }
+                }
+            }"#,
+        );
+        let (name, entry) = cfg.resolve_role(ConfigRole::Review).unwrap();
+        assert_eq!(name, "glm");
+        assert_eq!(entry.model.as_deref(), Some("glm-4.6"));
+    }
+
+    #[test]
+    fn provider_type_of_returns_explicit_value_when_set() {
+        let entry = ProviderEntry {
+            provider_type: Some("openai".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(Config::provider_type_of("ollama", &entry), "openai");
+    }
+
+    #[test]
+    fn provider_type_of_falls_back_to_alias_when_unset() {
+        let entry = ProviderEntry::default();
+        assert_eq!(Config::provider_type_of("deepseek", &entry), "deepseek");
+        // Lowercases so `Anthropic` alias still parses as built-in.
+        assert_eq!(Config::provider_type_of("Anthropic", &entry), "anthropic");
+    }
+
+    #[test]
+    fn providers_map_returns_clone() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "providers": { "deepseek": { "model": "x" } }
+            }"#,
+        );
+        let map = cfg.providers_map();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("deepseek"));
+    }
+
+    #[test]
+    fn providers_map_empty_when_unset() {
+        let cfg = Config::default();
+        assert!(cfg.providers_map().is_empty());
+    }
+
+    /// New unified shape (matches the target documented in the
+    /// refactor): a `providers` map with mixed built-in entries
+    /// (just a `model`) and aliased entries (`provider_type` +
+    /// `base_url`) parses cleanly and round-trips through
+    /// `resolve_role` / `provider_type_of`.
+    #[test]
+    fn new_shape_with_aliased_ollama_parses() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "provider": "deepseek",
+                "providers": {
+                    "deepseek": { "model": "deepseek-v4-pro" },
+                    "ollama": {
+                        "provider_type": "openai",
+                        "base_url": "http://127.0.0.1:11434/v1"
+                    }
+                }
+            }"#,
+        );
+        let (name, entry) = cfg.resolve_role(ConfigRole::Default).unwrap();
+        assert_eq!(name, "deepseek");
+        assert_eq!(entry.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(Config::provider_type_of("deepseek", &entry), "deepseek");
+
+        let ollama = cfg.providers_map().get("ollama").cloned().unwrap();
+        assert_eq!(Config::provider_type_of("ollama", &ollama), "openai");
+        assert_eq!(
+            ollama.base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+    }
+
+    /// Legacy `model` at top level is detected before deserialization.
+    /// `load()` reads from disk so we can't drive it directly here;
+    /// we verify the detection predicate the same way `load()` does.
+    #[test]
+    fn legacy_model_key_detected() {
+        let raw: serde_json::Value =
+            serde_json::from_str(r#"{"model": "deepseek-v4-pro"}"#).unwrap();
+        let obj = raw.as_object().unwrap();
+        let legacy = ["custom_providers", "model", "review_model"];
+        let found: Vec<&str> = legacy
+            .iter()
+            .copied()
+            .filter(|k| obj.contains_key(*k))
+            .collect();
+        assert_eq!(found, vec!["model"]);
+    }
+
+    #[test]
+    fn legacy_custom_providers_key_detected() {
+        let raw: serde_json::Value =
+            serde_json::from_str(r#"{"custom_providers": {"x": {}}}"#).unwrap();
+        let obj = raw.as_object().unwrap();
+        let legacy = ["custom_providers", "model", "review_model"];
+        let found: Vec<&str> = legacy
+            .iter()
+            .copied()
+            .filter(|k| obj.contains_key(*k))
+            .collect();
+        assert_eq!(found, vec!["custom_providers"]);
     }
 }
