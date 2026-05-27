@@ -125,6 +125,58 @@ fn apply_subagent_panel_event(
 /// multi-paragraph text). `sanitize_output` is applied per line to
 /// strip control bytes — the paste-placeholder SOH markers in
 /// particular must not leak to the terminal.
+/// Strip a leading `<system-reminder>…</system-reminder>` block (and
+/// any trailing blank lines) so the user's visible echo shows only
+/// what they typed. The agent loop currently sees the full prepended
+/// string for LLM context; the UI's visible log should not. Used by
+/// the `AgentEvent::UserMessage` handler. Returns the input slice
+/// unchanged if no reminder block is present.
+fn strip_leading_system_reminder(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    let Some(rest) = trimmed.strip_prefix("<system-reminder>") else {
+        return content;
+    };
+    let Some(end) = rest.find("</system-reminder>") else {
+        return content;
+    };
+    let after = &rest[end + "</system-reminder>".len()..];
+    after.trim_start_matches(['\n', '\r', ' ', '\t'])
+}
+
+#[cfg(test)]
+mod strip_system_reminder_tests {
+    use super::strip_leading_system_reminder;
+
+    #[test]
+    fn passes_plain_text_through() {
+        assert_eq!(strip_leading_system_reminder("hello"), "hello");
+    }
+
+    #[test]
+    fn strips_block_and_trailing_blank_lines() {
+        let input = "<system-reminder>\nTask 1 done\n</system-reminder>\n\nwhat's next?";
+        assert_eq!(strip_leading_system_reminder(input), "what's next?");
+    }
+
+    #[test]
+    fn does_not_strip_mid_message_reminder() {
+        let input = "see <system-reminder>nope</system-reminder>";
+        assert_eq!(strip_leading_system_reminder(input), input);
+    }
+
+    #[test]
+    fn handles_leading_whitespace_before_reminder() {
+        let input = "  \n<system-reminder>x</system-reminder>\nhi";
+        assert_eq!(strip_leading_system_reminder(input), "hi");
+    }
+
+    #[test]
+    fn missing_close_tag_leaves_input_alone() {
+        let input = "<system-reminder>oops";
+        assert_eq!(strip_leading_system_reminder(input), input);
+    }
+}
+
 fn write_user_lines(renderer: &mut Renderer, text: &str) -> std::io::Result<()> {
     const PREFIX: &str = "<you> ";
     // Visible width of `PREFIX` — 6 cells. Used as the continuation
@@ -3092,8 +3144,13 @@ pub async fn run_interactive(
                         if !is_running && !interjection_queue.lock().unwrap().is_empty() {
                             let queued: Vec<String> = interjection_queue.lock().unwrap().drain(..).collect();
                             let combined = queued.join("\n\n");
-                            write_user_lines(&mut renderer, &combined)?;
-                            renderer.write_line("", Color::White)?;
+                            // No write_user_lines here — the loop's
+                            // MessageStart{User} → AgentEvent::UserMessage
+                            // bridge will render the user's text once,
+                            // post-stripping the system-reminder block.
+                            // Calling write_user_lines here would
+                            // duplicate the render (see commit 7584bdf
+                            // for the original regular-input fix).
 
                             last_user_prompt.clone_from(&combined);
                             let history = crate::agent::runner::convert_history(session);
@@ -3235,8 +3292,9 @@ pub async fn run_interactive(
                         if !interjection_queue.lock().unwrap().is_empty() {
                             let queued: Vec<String> = interjection_queue.lock().unwrap().drain(..).collect();
                             let combined = queued.join("\n\n");
-                            write_user_lines(&mut renderer, &combined)?;
-                            renderer.write_line("", Color::White)?;
+                            // No write_user_lines — same reasoning as
+                            // the idle-drain path above; the loop's
+                            // UserMessage bridge handles the render.
 
                             last_user_prompt.clone_from(&combined);
                             let history = crate::agent::runner::convert_history(session);
@@ -3652,7 +3710,23 @@ pub async fn run_interactive(
                         )?;
                     }
                     AgentEvent::UserMessage { content } => {
-                        write_user_lines(&mut renderer, &content)?;
+                        // The agent loop emits the literal prompt that
+                        // went to the LLM, which may have a
+                        // `<system-reminder>…</system-reminder>` block
+                        // prepended (from `prepend_pending_notifications`
+                        // when background tasks have just completed —
+                        // see src/agent/tools/background.rs:300). The
+                        // user's view should NOT show that wrapper —
+                        // they just see their own text and any visible
+                        // background-task notice the UI rendered
+                        // separately. Strip the leading reminder block
+                        // (and its trailing blank line) before
+                        // rendering. The on-disk session already stores
+                        // the clean `text` via the submit-path's
+                        // `session.add_message(User, &text)` call.
+                        let visible =
+                            strip_leading_system_reminder(&content);
+                        write_user_lines(&mut renderer, visible)?;
                         renderer.write_line("", Color::White)?;
                         // session.add_message handled at input time (line ~2119)
                     }
