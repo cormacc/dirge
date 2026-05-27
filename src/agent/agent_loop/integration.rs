@@ -420,6 +420,9 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         compact_model: None,
         storm_mutating_tools: None,
         storm_exempt_tools: None,
+        repair_stats: std::sync::Arc::new(
+            crate::agent::agent_loop::tool_input_repair::RepairStats::new(),
+        ),
     };
 
     #[cfg(feature = "plugin")]
@@ -913,6 +916,7 @@ mod tests {
             AgentEvent::UserMessage { .. } => "UserMessage",
             AgentEvent::ContextCompacted { .. } => "ContextCompacted",
             AgentEvent::RetryNotice { .. } => "RetryNotice",
+            AgentEvent::RepairStats { .. } => "RepairStats",
         }
     }
 

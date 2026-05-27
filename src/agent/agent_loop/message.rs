@@ -385,6 +385,17 @@ pub enum LoopEvent {
         delay_ms: u64,
         error: String,
     },
+
+    /// Phase-1 telemetry (docs/AGENTIC_LOOP_PLAN.md): per-run
+    /// aggregate of the input-repair counters, emitted just
+    /// before `AgentEnd`. The UI prints a one-line summary when
+    /// `!snapshot.is_empty()` so users see at session close
+    /// "repaired 3 inputs (1 md-link, 2 null-strip), 0 invalid".
+    /// Empty snapshots are not emitted — the run-finish path
+    /// only sends this when at least one repair fired.
+    RepairStats {
+        snapshot: super::tool_input_repair::RepairStatsSnapshot,
+    },
 }
 
 impl LoopEvent {
@@ -406,6 +417,7 @@ impl LoopEvent {
             LoopEvent::TurnEnd { .. } => "turn_end",
             LoopEvent::ContextCompacted { .. } => "context_compacted",
             LoopEvent::RetryNotice { .. } => "retry_notice",
+            LoopEvent::RepairStats { .. } => "repair_stats",
         }
     }
 }

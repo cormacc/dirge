@@ -3,6 +3,7 @@ use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
+use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
     AskSender, FindFilesArgs, MAX_FIND_RESULTS, PermCheck, ToolError, check_perm, check_perm_path,
@@ -48,7 +49,10 @@ impl Tool for FindFilesTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "find_files".to_string(),
-            description: "Recursively find FILES whose FILENAME matches a regex pattern. Use this to locate a file by name (e.g. `^Cargo\\.toml$`, `.*_test\\.py$`). NOT for finding symbol definitions — use `find_definition` for that. NOT for content search — use `grep`. Respects .gitignore; skips node_modules and target.".to_string(),
+            description: with_contract_hint(
+                "find_files",
+                "Recursively find FILES whose FILENAME matches a regex pattern. Use this to locate a file by name (e.g. `^Cargo\\.toml$`, `.*_test\\.py$`). NOT for finding symbol definitions — use `find_definition` for that. NOT for content search — use `grep`. Respects .gitignore; skips node_modules and target.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

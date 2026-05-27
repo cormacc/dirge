@@ -5,6 +5,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use std::path::Path;
 
+use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, PermCheck, ReadArgs, ToolError, check_perm_path_resolve};
 #[cfg(feature = "lsp")]
@@ -141,7 +142,10 @@ impl Tool for ReadTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "read".to_string(),
-            description: "Read the contents of a file. Supports text files. Defaults to first 2000 lines. Use offset/limit for large files.".to_string(),
+            description: with_contract_hint(
+                "read",
+                "Read the contents of a file. Supports text files. Defaults to first 2000 lines. Use offset/limit for large files.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

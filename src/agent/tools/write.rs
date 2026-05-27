@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
+use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, PermCheck, ToolError, WriteArgs, check_perm_path_resolve};
 #[cfg(feature = "lsp")]
@@ -69,7 +70,10 @@ impl Tool for WriteTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "write".to_string(),
-            description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.".to_string(),
+            description: with_contract_hint(
+                "write",
+                "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

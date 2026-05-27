@@ -5,6 +5,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use std::path::Path;
 
+use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, EditArgs, PermCheck, ToolError, check_perm_path_resolve};
 #[cfg(feature = "lsp")]
@@ -108,7 +109,10 @@ impl Tool for EditTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "edit".to_string(),
-            description: "Edit a file by replacing exact text. If old_text appears once, replaces it. If it appears multiple times and replace_all is false, returns all match locations with line numbers. Use replaceAll: true to replace every occurrence. Handles both LF and CRLF line endings.".to_string(),
+            description: with_contract_hint(
+                "edit",
+                "Edit a file by replacing exact text. If old_text appears once, replaces it. If it appears multiple times and replace_all is false, returns all match locations with line numbers. Use replaceAll: true to replace every occurrence. Handles both LF and CRLF line endings.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

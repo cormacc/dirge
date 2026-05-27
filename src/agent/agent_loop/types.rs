@@ -297,6 +297,15 @@ pub struct LoopConfig {
     /// suppressed regardless of repetition). Built-in defaults
     /// (`read`, `list_dir`, `grep`, etc.) are always included.
     pub storm_exempt_tools: Option<Vec<String>>,
+
+    /// Phase-1 telemetry (docs/AGENTIC_LOOP_PLAN.md): per-run
+    /// aggregate counters for the input-repair layer. Increment
+    /// happens inside `prepare_tool_call` after a successful repair
+    /// (or `record_invalid` when the repair pass exhausts); the
+    /// snapshot lands in `LoopEvent::RepairStats` at `AgentEnd` so
+    /// the UI can print "repaired 3 inputs (1 md-link unwrap, 2
+    /// null-strip), 0 invalid" at session close.
+    pub repair_stats: std::sync::Arc<super::tool_input_repair::RepairStats>,
 }
 
 /// `convertToLlm` signature. Synchronous in pi (returns
@@ -401,6 +410,7 @@ impl Clone for LoopConfig {
             compact_model: self.compact_model.clone(),
             storm_mutating_tools: self.storm_mutating_tools.clone(),
             storm_exempt_tools: self.storm_exempt_tools.clone(),
+            repair_stats: self.repair_stats.clone(),
         }
     }
 }

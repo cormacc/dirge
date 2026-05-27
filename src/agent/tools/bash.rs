@@ -3,6 +3,7 @@ use rig::tool::Tool;
 use tokio::process::Command;
 use tokio::time::Duration;
 
+use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{AskSender, BashArgs, PermCheck, Scope, ToolError, enforce};
 
@@ -279,7 +280,10 @@ impl Tool for BashTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "bash".to_string(),
-            description: "Execute a bash command in the current working directory. Returns stdout and stderr.".to_string(),
+            description: with_contract_hint(
+                "bash",
+                "Execute a bash command in the current working directory. Returns stdout and stderr.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

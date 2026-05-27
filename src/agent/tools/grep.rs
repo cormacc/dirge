@@ -3,6 +3,7 @@ use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
+use crate::agent::agent_loop::tool_input_repair::with_contract_hint;
 use crate::agent::tools::cache::ToolCache;
 use crate::agent::tools::{
     AskSender, GrepArgs, MAX_GREP_RESULTS, PermCheck, ToolError, check_perm, check_perm_path,
@@ -77,7 +78,10 @@ impl Tool for GrepTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "grep".to_string(),
-            description: "Search file contents using a regex pattern (Rust regex syntax). Respects .gitignore. Skips binary files, node_modules, and target.".to_string(),
+            description: with_contract_hint(
+                "grep",
+                "Search file contents using a regex pattern (Rust regex syntax). Respects .gitignore. Skips binary files, node_modules, and target.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

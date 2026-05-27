@@ -2174,6 +2174,37 @@ pub async fn run_interactive(
                             theme::dim(),
                         )?;
                     }
+                    AgentEvent::RepairStats { snapshot } => {
+                        // Phase-1 telemetry. Only emitted when a
+                        // repair fired or an input was invalid,
+                        // so we don't need an `is_empty()` guard
+                        // here — but include it defensively.
+                        if snapshot.is_empty() {
+                            continue;
+                        }
+                        let mut parts: Vec<String> = Vec::new();
+                        if snapshot.md_link_unwrapped > 0 {
+                            parts.push(format!("{} md-link", snapshot.md_link_unwrapped));
+                        }
+                        if snapshot.null_stripped > 0 {
+                            parts.push(format!("{} null-strip", snapshot.null_stripped));
+                        }
+                        if snapshot.json_string_to_array > 0 {
+                            parts.push(format!("{} json-array", snapshot.json_string_to_array));
+                        }
+                        if snapshot.object_to_array > 0 {
+                            parts.push(format!("{} obj-to-array", snapshot.object_to_array));
+                        }
+                        if snapshot.bare_string_to_array > 0 {
+                            parts.push(format!("{} bare-to-array", snapshot.bare_string_to_array));
+                        }
+                        let total = snapshot.total_successful();
+                        let mut line = format!("  ⊕ repaired {total} input(s): {}", parts.join(", "));
+                        if snapshot.invalid > 0 {
+                            line.push_str(&format!("; {} invalid", snapshot.invalid));
+                        }
+                        renderer.write_line(&line, theme::dim())?;
+                    }
                 }
                 renderer.draw_bottom(
                     &input,

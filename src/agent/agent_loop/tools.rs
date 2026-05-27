@@ -234,6 +234,12 @@ async fn prepare_tool_call(
                 original_args = %original_truncated,
                 "tool input repaired"
             );
+            // Phase-1 telemetry: bump the per-kind aggregate
+            // counters so the run-finish event can emit a summary
+            // ("repaired 3 inputs: 1 md-link, 2 null-strip").
+            for kind in &rr.kinds {
+                config.repair_stats.record(*kind);
+            }
             rr.repaired
         }
         Err(errors) => {
@@ -242,13 +248,32 @@ async fn prepare_tool_call(
                 &prepared_args,
                 &errors,
             );
-            tracing::info!(
-                target: "tool_repair",
+            // Phase-1 telemetry: keep the original (truncated to
+            // 16 KiB so an adversarial payload can't blow the log
+            // ring) so the failure can be inspected offline. This
+            // is the "tool_input_invalid" event from
+            // agentic-features.md §2.6 — split out from the
+            // generic `tool_repair = "failed"` log so structured-
+            // log consumers can filter on it directly.
+            let original_args = serde_json::to_string(&prepared_args).unwrap_or_default();
+            let original_truncated: String = if original_args.len() > 16384 {
+                format!(
+                    "{}... ({} bytes truncated)",
+                    &original_args[..16384],
+                    original_args.len() - 16384
+                )
+            } else {
+                original_args
+            };
+            tracing::warn!(
+                target: "tool_input_invalid",
                 model = config.model_name.as_deref().unwrap_or("unknown"),
                 tool = %tool_call.name,
-                repair = "failed",
-                "tool input repair failed"
+                validation_errors = ?errors,
+                original_args = %original_truncated,
+                "tool input invalid after repair pass"
             );
+            config.repair_stats.record_invalid();
             return PrepareOutcome::Immediate {
                 result: create_error_tool_result(&msg),
                 is_error: true,

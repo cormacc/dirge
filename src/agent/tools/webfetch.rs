@@ -482,8 +482,10 @@ impl Tool for WebFetchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "webfetch".to_string(),
-            description: "Fetch the content of one or more URLs and return it as markdown. Schemeless URLs get https:// prepended. Private/loopback/link-local addresses (127.0.0.0/8, 10.x, 172.16.x, 192.168.x, 169.254.x cloud metadata, ::1, fc00::/7, fe80::/10) and bare 'localhost' are refused by default; set DIRGE_WEBFETCH_ALLOW_PRIVATE=1 to permit them for local-dev workflows. Use for reading documentation pages, API references, or any web content."
-                .to_string(),
+            description: crate::agent::agent_loop::tool_input_repair::with_contract_hint(
+                "webfetch",
+                "Fetch the content of one or more URLs and return it as markdown. Schemeless URLs get https:// prepended. Private/loopback/link-local addresses (127.0.0.0/8, 10.x, 172.16.x, 192.168.x, 169.254.x cloud metadata, ::1, fc00::/7, fe80::/10) and bare 'localhost' are refused by default; set DIRGE_WEBFETCH_ALLOW_PRIVATE=1 to permit them for local-dev workflows. Use for reading documentation pages, API references, or any web content.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

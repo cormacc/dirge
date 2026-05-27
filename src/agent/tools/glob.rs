@@ -97,8 +97,10 @@ impl Tool for GlobTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "glob".to_string(),
-            description: "Find files matching a glob pattern (e.g., '**/*.rs', 'src/**/*.tsx'). Respects .gitignore via ignore crate. Returns matching relative file paths sorted by modification time (newest first). Returns empty string when no files match. Use this for natural path pattern matching instead of regex-based find_files."
-                .to_string(),
+            description: crate::agent::agent_loop::tool_input_repair::with_contract_hint(
+                "glob",
+                "Find files matching a glob pattern (e.g., '**/*.rs', 'src/**/*.tsx'). Respects .gitignore via ignore crate. Returns matching relative file paths sorted by modification time (newest first). Returns empty string when no files match. Use this for natural path pattern matching instead of regex-based find_files.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

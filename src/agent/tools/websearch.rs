@@ -108,8 +108,10 @@ impl Tool for WebSearchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "websearch".to_string(),
-            description: "Search the web. Returns titles, URLs, and snippets. Use for looking up current documentation, API references, or up-to-date information beyond your training cutoff. Works out of the box without any API key — rotates between Exa and Parallel.ai hosted MCP endpoints (50/50 per process, pin with `DIRGE_WEBSEARCH_PROVIDER=exa|parallel`). Optional `EXA_API_KEY` / `PARALLEL_API_KEY` raise the respective rate limits. DuckDuckGo HTML scrape is the last-resort fallback if both upstream MCP endpoints fail."
-                .to_string(),
+            description: crate::agent::agent_loop::tool_input_repair::with_contract_hint(
+                "websearch",
+                "Search the web. Returns titles, URLs, and snippets. Use for looking up current documentation, API references, or up-to-date information beyond your training cutoff. Works out of the box without any API key — rotates between Exa and Parallel.ai hosted MCP endpoints (50/50 per process, pin with `DIRGE_WEBSEARCH_PROVIDER=exa|parallel`). Optional `EXA_API_KEY` / `PARALLEL_API_KEY` raise the respective rate limits. DuckDuckGo HTML scrape is the last-resort fallback if both upstream MCP endpoints fail.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

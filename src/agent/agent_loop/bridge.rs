@@ -139,6 +139,10 @@ impl EventBridge {
                 }]
             }
 
+            LoopEvent::RepairStats { snapshot } => {
+                vec![AgentEvent::RepairStats { snapshot }]
+            }
+
             LoopEvent::AgentEnd { messages } => {
                 // Phase 4.5h-1: classify the run's terminal state
                 // by inspecting the LAST assistant message:

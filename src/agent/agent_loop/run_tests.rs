@@ -78,6 +78,9 @@ fn build_config() -> LoopConfig {
         compact_model: None,
         storm_mutating_tools: None,
         storm_exempt_tools: None,
+        repair_stats: std::sync::Arc::new(
+            crate::agent::agent_loop::tool_input_repair::RepairStats::new(),
+        ),
     }
 }
 

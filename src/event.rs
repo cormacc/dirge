@@ -163,6 +163,14 @@ pub enum AgentEvent {
         delay_ms: u64,
         error: CompactString,
     },
+    /// Per-run input-repair telemetry, emitted just before
+    /// `AgentEvent::Done`. The UI prints a one-line summary
+    /// ("repaired 3 inputs: 1 md-link, 2 null-strip; 0 invalid")
+    /// when at least one repair fired. Empty snapshots aren't
+    /// emitted at all. Phase-1 of docs/AGENTIC_LOOP_PLAN.md.
+    RepairStats {
+        snapshot: crate::agent::agent_loop::tool_input_repair::RepairStatsSnapshot,
+    },
 }
 
 #[derive(Debug, Clone)]

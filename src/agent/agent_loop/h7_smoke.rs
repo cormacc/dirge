@@ -164,6 +164,13 @@ fn dump_events(events: &[AgentEvent]) {
             } => {
                 eprintln!("\n[retry_notice] attempt={attempt} delay_ms={delay_ms}: {error}");
             }
+            AgentEvent::RepairStats { snapshot } => {
+                eprintln!(
+                    "\n[repair_stats] total={} invalid={}",
+                    snapshot.total_successful(),
+                    snapshot.invalid,
+                );
+            }
         }
     }
     eprintln!();

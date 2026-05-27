@@ -741,6 +741,18 @@ pub async fn run_loop(
         break;
     }
 
+    // Phase-1 telemetry (docs/AGENTIC_LOOP_PLAN.md): emit the
+    // per-run repair counter snapshot just before AgentEnd, but
+    // only when at least one repair fired or one input was
+    // invalid. Empty snapshots are skipped so the UI doesn't
+    // print "repaired 0 inputs" on every clean session.
+    {
+        let snapshot = config.repair_stats.snapshot();
+        if !snapshot.is_empty() {
+            let _ = emit.send(LoopEvent::RepairStats { snapshot }).await;
+        }
+    }
+
     // Pi line 268: final agent_end.
     let _ = emit
         .send(LoopEvent::AgentEnd {

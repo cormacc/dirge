@@ -598,6 +598,7 @@ fn full_run_event_sequence_translates_correctly() {
             AgentEvent::CustomMessage { .. } => "CustomMessage",
             AgentEvent::UserMessage { .. } => "UserMessage",
             AgentEvent::RetryNotice { .. } => "RetryNotice",
+            AgentEvent::RepairStats { .. } => "RepairStats",
         })
         .collect();
     assert_eq!(

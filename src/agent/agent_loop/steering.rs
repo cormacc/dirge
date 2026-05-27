@@ -372,6 +372,9 @@ mod tests {
             compact_model: None,
             storm_mutating_tools: None,
             storm_exempt_tools: None,
+            repair_stats: std::sync::Arc::new(
+                crate::agent::agent_loop::tool_input_repair::RepairStats::new(),
+            ),
         };
         config.get_steering_messages = Some(steering_from_queue(queue.clone(), QueueMode::All));
 
