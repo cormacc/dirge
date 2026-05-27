@@ -1,0 +1,45 @@
+# Per-target build settings.
+#
+# Goal: speed up incremental dev builds. The dominant cost on a fresh
+# `cargo build` is crate compilation (rig, tree-sitter, rusqlite,
+# etc.) — `mold` doesn't help there. The dominant cost on a touch-and-
+# rebuild is LINKING the dirge binary itself, which is exactly what
+# mold targets.
+#
+# On macOS the Xcode 15+ default `ld` is already much faster than the
+# old Mach-O linker, and mold's macOS support (formerly `sold`) is
+# discontinued. We don't override the linker on Darwin.
+#
+# On Linux: install mold first
+#   sudo apt install mold              # Debian/Ubuntu 23.04+
+#   sudo dnf install mold              # Fedora 38+
+#   brew install mold                  # Linuxbrew
+# then `cargo build` automatically picks it up via the flags below.
+# Falls back gracefully if `clang` is missing — the rustflags will
+# fail loudly and the user can comment them out.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Dev-profile speedups that apply on every platform.
+#
+# - `split-debuginfo = "unpacked"`: on macOS, leaves debug info in the
+#   `.o` files instead of bundling into a `.dSYM` package every link.
+#   Per https://blog.rust-lang.org/2020/12/31/Rust-1.49.html#new-default-on-macos
+#   this is the recommended dev default but `cargo` historically left
+#   it off. Saves ~30-50% of incremental-link time on macOS.
+# - `incremental = true`: already the default for dev but make it
+#   explicit so a future profile-override doesn't silently disable.
+[profile.dev]
+split-debuginfo = "unpacked"
+incremental = true
+
+# Release profile: leave incremental off (the default) and split-debug
+# off so the final binary keeps its inline debuginfo for crash
+# reports. mold still kicks in on Linux release builds via the
+# target-specific rustflags above.
