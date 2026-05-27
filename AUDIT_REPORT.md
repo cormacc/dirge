@@ -238,4 +238,72 @@ new `SummarizeFn` callback on `LoopSpawnConfig` →
 
 ---
 
-*Generated 2026-05-26 from 7 parallel subagent audits totaling ~1.1M tokens of analysis.*
+## 9. Closing Summary (2026-05-27)
+
+All 60 original findings landed during this audit cycle. Test suite:
+1707 pass / 0 fail / 6 ignored (the previously pre-existing
+`extracts_defmethod_as_method` Clojure test was also resolved).
+
+### Closed by design (won't fix)
+
+- **PERM-10 / TOOL-15** — `GITHUB_TOKEN` / `GH_TOKEN` / `SSH_AUTH_SOCK`
+  in sandbox `SAFE_EXACT`. Intentional so `gh` CLI and `git push`
+  over SSH continue to work from bash children.
+- **SESS-6** — `pop_last_message` gating on `!still_referenced` is
+  correct for forked branches. Round-1 misclassification.
+
+### Partial fixes that went further this round
+
+- **TOOL-1** — DNS rebinding now fully closed: a custom
+  `reqwest::dns::Resolve` (`ValidatingResolver`) filters every
+  resolved `SocketAddr` (initial AND redirects, including
+  rebinding past the resolver TTL) against the private/loopback
+  blocklist. The TOC/TOU window is shut.
+- **EXT-12** — backoff calculator now clamps on `Duration` directly
+  via `checked_shl(attempts.min(20))` — eliminates the
+  shift-overflow footgun if `attempts` ever exceeds the hard cap.
+
+### Deferred (open follow-ups)
+
+From the LOOP-9 / SESS-2 port:
+
+1. **Session-side state mutation on `ContextCompacted`** —
+   `LoopEvent::ContextCompacted` fires with a fresh
+   `compacted-<8hex>` session id; the UI event consumer
+   (`src/ui/mod.rs:3584+`) still needs to flip `session.id`
+   in-place, push a `Compaction` entry, and `save_session`. ~30
+   LOC once the event consumer is touched.
+2. **Background compression** — `SummarizeFn` is `.await`ed
+   inline; Hermes detaches via `tokio::spawn`.
+3. **Multi-generation summary chaining** — honor most-recent prior
+   summary today; Hermes preserves a hierarchy.
+4. **`/compress <focus>` argument** — `build_summary_prompt`
+   accepts `focus_topic` but slash command doesn't pass it.
+
+### Stretch items addressed this round
+
+- **PROV-1 stretch** — `looks_like_local_host` distinguishes
+  loopback / RFC1918 / `.local` from public hosts; loud stderr
+  warning when `allow_insecure: true` is paired with a non-local
+  http:// endpoint. The legitimate ollama/vllm/lmstudio case
+  stays silent.
+- **Plugin name collision policy** — already refuses registration
+  by default (EXT-11); no opt-in override added (an override
+  would re-expose the security risk this fix closes).
+
+### Architecture takeaways
+
+- The audit surfaced two cross-cutting themes worth tracking:
+  (a) ANSI/escape-byte sanitization on every boundary where
+  attacker-controlled text reaches the terminal or the LLM, and
+  (b) cache-key composition that accounts for external mutators.
+  Both now have shared helpers (`ansi::strip_escapes`,
+  `cache::fs_stamp`, `compute_head_hash`) used uniformly.
+- `bd` tracking would have helped — the audit produced 60
+  findings across 7 subsystems, and a structured tracker would
+  have surfaced cross-area dependencies (e.g. EXT-11's MCP
+  collision interacts with PERM-7's deny-list probe) that took
+  manual passes to spot.
+
+*Generated 2026-05-26, closed 2026-05-27 over ~10 commits and
+~2M tokens of analysis + implementation.*

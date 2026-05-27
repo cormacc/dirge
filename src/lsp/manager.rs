@@ -116,8 +116,19 @@ impl BrokenState {
     /// exponential growth still hits the 10-min cap within ~10
     /// failures and stops thrashing.
     fn backoff(&self) -> std::time::Duration {
-        let exp = self.attempts.saturating_sub(1).min(10);
-        std::time::Duration::from_secs(1u64 << exp).min(std::time::Duration::from_secs(600))
+        // EXT-12: clamp on the Duration directly. The previous form
+        // (`1u64 << exp`) was defensively gated by `exp.min(10)`,
+        // but a future edit that lifts the exp cap past 63 would
+        // silently overflow before the duration clamp. Computing
+        // and clamping on `Duration` removes the shift-overflow
+        // footgun and keeps the same 1s → 2s → 4s → … → 10min
+        // ladder.
+        const CAP: std::time::Duration = std::time::Duration::from_secs(600);
+        let attempts = self.attempts.saturating_sub(1) as u32;
+        // Cap the exponent before the shift so the multiplication
+        // can't overflow even if `attempts` becomes pathological.
+        let mul = 1u64.checked_shl(attempts.min(20)).unwrap_or(u64::MAX);
+        std::time::Duration::from_secs(mul).min(CAP)
     }
 
     /// True while we're still inside the backoff window.

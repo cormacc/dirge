@@ -186,7 +186,69 @@ fn validate_custom_provider(
             name, base_url
         ));
     }
+    // PROV-1 stretch: when allow_insecure is set AND the base_url is
+    // http://, also gate on host shape. Loopback / private-range
+    // hosts (the legitimate ollama/vllm/lmstudio case) are silent;
+    // a public-looking host with allow_insecure gets a LOUD stderr
+    // warning every session so a misconfigured production setup
+    // doesn't silently leak conversation content.
+    if allow_insecure
+        && base_url.starts_with("http://")
+        && !looks_like_local_host(base_url)
+    {
+        eprintln!(
+            "  ⚠️  WARNING: custom provider '{}' is using http:// over a NON-LOCAL host: {}\n  Every prompt, file content, and tool result is sent in plaintext.\n  This is allowed because allow_insecure: true is set in config.json,\n  but you should verify this is intentional — the typical allow_insecure\n  use case is loopback (127.0.0.1 / localhost) endpoints like ollama.",
+            name, base_url,
+        );
+    }
     Ok(())
+}
+
+/// Quick check whether a base_url's host appears to be a loopback or
+/// private-range address. Used by `validate_custom_provider` to
+/// decide whether `allow_insecure: true` is benign (local ollama)
+/// or alarming (somebody pointing at a public http endpoint). Not
+/// a security boundary — `validate_custom_provider` already
+/// rejected the dangerous case (http without allow_insecure) before
+/// this function runs.
+fn looks_like_local_host(base_url: &str) -> bool {
+    let scheme_len = if base_url.len() >= 7 && base_url[..7].eq_ignore_ascii_case("http://") {
+        7
+    } else {
+        return false;
+    };
+    let after = &base_url[scheme_len..];
+    let end = after
+        .find(|c: char| matches!(c, '/' | '?' | '#'))
+        .unwrap_or(after.len());
+    let host_and_port = &after[..end];
+    let host: &str = if let Some(rest) = host_and_port.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        &rest[..end]
+    } else {
+        host_and_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_and_port)
+    };
+    let lower = host.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "localhost" | "ip6-localhost" | "ip6-loopback"
+    ) {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local()
+            }
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        };
+    }
+    // `.local` mDNS names are also commonly local-only.
+    lower.ends_with(".local")
 }
 
 /// Process-global map of plugin-registered providers, populated once

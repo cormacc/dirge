@@ -531,8 +531,12 @@ mod tests {
         assert!(!callees.contains(&"if".to_string()));
     }
 
-    /// Defmethod is surfaced as a Method whose parent_class is the
-    /// multifn name (handy for `list_symbols --kind method`).
+    /// Defmethod is surfaced as a Method named after the multifn
+    /// (so `list_symbols --kind method` finds it under `shape`),
+    /// with `parent_class` set to the DISPATCH VALUE so sibling
+    /// defmethods on the same multifn are distinguishable. Audit
+    /// L5 changed the prior self-referential `parent_class =
+    /// multifn-name` semantic; this test pins the new shape.
     #[test]
     fn extracts_defmethod_as_method() {
         let src = "(defmulti shape :kind)\n(defmethod shape :circle [c] :circle)\n";
@@ -548,8 +552,36 @@ mod tests {
             .iter()
             .find(|s| matches!(s.kind, SymbolKind::Method))
             .expect("defmethod present");
+        // Method name is the multifn — same lookup affordance as
+        // other languages' overloaded-method handling.
         assert_eq!(method.name, "shape");
-        assert_eq!(method.parent_class.as_deref(), Some("shape"));
+        // Parent_class carries the dispatch value, which is what
+        // disambiguates `(defmethod shape :circle …)` from
+        // `(defmethod shape :square …)`.
+        assert_eq!(method.parent_class.as_deref(), Some(":circle"));
+    }
+
+    /// Sibling defmethods on the same multifn must have distinct
+    /// dispatch-value tags so symbol-table consumers can tell them
+    /// apart. Regression test for the audit L5 fix.
+    #[test]
+    fn extracts_sibling_defmethods_with_distinct_parent_class() {
+        let src = "(defmulti shape :kind)\n\
+                   (defmethod shape :circle [c] :c)\n\
+                   (defmethod shape :square [s] :s)\n";
+        let f = adapter().extract(&pb("a.clj"), src).unwrap();
+        let methods: Vec<&Symbol> = f
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Method))
+            .collect();
+        assert_eq!(methods.len(), 2, "two defmethods expected");
+        let dispatches: std::collections::HashSet<_> = methods
+            .iter()
+            .filter_map(|s| s.parent_class.as_deref())
+            .collect();
+        assert!(dispatches.contains(":circle"));
+        assert!(dispatches.contains(":square"));
     }
 
     /// Extensions list is what the AdapterRegistry routes on.

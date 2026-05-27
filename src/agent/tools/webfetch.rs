@@ -144,6 +144,59 @@ fn validate_url_host_safety(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// TOOL-1 (deep): custom `reqwest::dns::Resolve` impl that filters
+/// every resolved `SocketAddr` against the private/loopback
+/// blocklist. Installed on the reqwest client via
+/// `.dns_resolver(Arc::new(ValidatingResolver))`. Closes the
+/// TOC/TOU window between `resolve_and_validate_host` (which
+/// runs before the request) and reqwest's internal connect-time
+/// resolution: now reqwest can't bypass our filter even on
+/// redirects, even if the cached system-resolver TTL expires
+/// mid-fetch. If `DIRGE_WEBFETCH_ALLOW_PRIVATE=1` is set we
+/// pass through unfiltered (matches the literal-check escape
+/// hatch).
+#[derive(Debug)]
+struct ValidatingResolver;
+
+impl reqwest::dns::Resolve for ValidatingResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let allow_private =
+                std::env::var("DIRGE_WEBFETCH_ALLOW_PRIVATE").as_deref() == Ok("1");
+            // System resolver via tokio. Use port 0 — reqwest
+            // overrides the port at connect time; we only care
+            // about the IP for validation.
+            let addrs: Vec<std::net::SocketAddr> =
+                match tokio::net::lookup_host((host.as_str(), 0)).await {
+                    Ok(it) => it.collect(),
+                    Err(e) => {
+                        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+                    }
+                };
+            let filtered: Vec<std::net::SocketAddr> = if allow_private {
+                addrs
+            } else {
+                addrs
+                    .into_iter()
+                    .filter(|a| !is_private_or_loopback(a.ip()))
+                    .collect()
+            };
+            if filtered.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "all resolved addresses for {host:?} are blocked by SSRF guard \
+                         (private/loopback/link-local); set DIRGE_WEBFETCH_ALLOW_PRIVATE=1 to allow"
+                    ),
+                )) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            let boxed: reqwest::dns::Addrs = Box::new(filtered.into_iter());
+            Ok(boxed)
+        })
+    }
+}
+
 /// TOOL-1: resolve `host:port` from the URL and reject if ANY
 /// resolved address is private/loopback/link-local. Catches DNS
 /// rebinding where an attacker-controlled hostname returns
@@ -493,8 +546,20 @@ impl Tool for WebFetchTool {
         // 169.254.169.254 (cloud metadata), RFC1918, loopback, etc.
         // Install a custom policy that re-runs the host check on
         // every hop and stops the redirect on failure.
+        //
+        // TOOL-1 full close: install a custom DNS resolver that
+        // filters every resolved `SocketAddr` against the same
+        // private/loopback blocklist. This shuts the TOC/TOU
+        // window between the per-URL `resolve_and_validate_host`
+        // check and reqwest's internal connect: every TCP connect
+        // (initial AND redirects) goes through the resolver, so
+        // even if the validated DNS cache expires mid-fetch the
+        // next resolution is re-checked. The literal-host /
+        // pre-resolve checks remain as cheap fast-paths and to
+        // produce clearer error messages.
         let client = reqwest::Client::builder()
             .user_agent("dirge/1.0")
+            .dns_resolver(std::sync::Arc::new(ValidatingResolver))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 // Bound the chain at the default-ish 10 hops so a
                 // pathological loop can't run forever even if every
