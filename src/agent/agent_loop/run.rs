@@ -328,6 +328,10 @@ pub async fn run_loop(
     // reminder poll when configured.
     let mut pending_messages: Vec<LoopMessage> = poll_steering_and_reminder(&config).await;
 
+    // dirge-nqr: count assistant turns so a hard cap can stop a
+    // runaway run. `max_turns = None` means unlimited (legacy).
+    let mut turns_taken: usize = 0;
+
     'outer: loop {
         // Storm: fresh intent on each new user turn.
         // Port of Reasonix loop.ts:621 `this.repair.resetStorm()`.
@@ -756,6 +760,42 @@ pub async fn run_loop(
             // Pi line 253: refresh steering for next iteration.
             // Phase 4 part 2: also polls the file-touch tracker.
             pending_messages = poll_steering_and_reminder(&config).await;
+
+            // dirge-nqr: cap reached → emit a system-visible note,
+            // append a user-facing message into the transcript so the
+            // model's history reflects the truncation, and bail.
+            turns_taken += 1;
+            if let Some(cap) = config.max_turns
+                && turns_taken >= cap
+            {
+                tracing::warn!(
+                    target: "dirge::agent_loop",
+                    turns = turns_taken,
+                    cap = cap,
+                    "max_turns reached — terminating run"
+                );
+                let notice = format!(
+                    "[dirge] Max agent turns ({cap}) reached. Stopping the run. Increase --max-agent-turns or `max_agent_turns` in config.json to allow more."
+                );
+                let _ = emit
+                    .send(LoopEvent::MessageStart {
+                        message: LoopMessage::User(super::message::UserMessage {
+                            content: notice.clone(),
+                        }),
+                    })
+                    .await;
+                let _ = emit
+                    .send(LoopEvent::MessageEnd {
+                        message: LoopMessage::User(super::message::UserMessage {
+                            content: notice.clone(),
+                        }),
+                    })
+                    .await;
+                new_messages.push(LoopMessage::User(super::message::UserMessage {
+                    content: notice,
+                }));
+                break 'outer;
+            }
         }
         // INNER END
 

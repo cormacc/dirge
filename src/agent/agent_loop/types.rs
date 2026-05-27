@@ -364,6 +364,15 @@ pub struct LoopConfig {
     /// Phase 4 part 2: per-session file-touch tracker for context-depth
     /// reminders. None when the feature isn't configured.
     pub file_touch_tracker: Option<std::sync::Arc<super::context_depth::FileTouchTracker>>,
+
+    /// dirge-nqr: hard cap on assistant turns within a single run.
+    /// `None` = unlimited (matches the legacy behaviour). When set,
+    /// the run loop terminates after `max_turns` assistant turns
+    /// have completed and emits a system message stating the cap
+    /// was hit. Honored by both the interactive and `--print`
+    /// paths; the CLI's `--max-agent-turns` / config's
+    /// `max_agent_turns` set it via `AnyAgent::with_max_turns`.
+    pub max_turns: Option<usize>,
 }
 
 /// `convertToLlm` signature. Synchronous in pi (returns
@@ -468,6 +477,7 @@ impl std::fmt::Debug for LoopConfig {
                 "file_touch_tracker",
                 &self.file_touch_tracker.as_ref().map(|_| "<tracker>"),
             )
+            .field("max_turns", &self.max_turns)
             .finish()
     }
 }
@@ -505,6 +515,7 @@ impl Clone for LoopConfig {
             escalation_max_per_session: self.escalation_max_per_session,
             escalation_remaining: self.escalation_remaining.clone(),
             file_touch_tracker: self.file_touch_tracker.clone(),
+            max_turns: self.max_turns,
         }
     }
 }

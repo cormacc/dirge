@@ -784,6 +784,10 @@ pub struct AnyAgent {
     /// `FileTouchTracker` for each session because the tracker is
     /// per-prompt (`active_task` is the initial prompt).
     context_depth_reminder_threshold: Option<usize>,
+    /// dirge-nqr: hard cap on assistant turns per run. Set via
+    /// `with_max_turns`. Forwarded to `LoopSpawnConfig.max_turns`
+    /// at spawn time. `None` = unlimited (legacy).
+    max_turns: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -819,7 +823,16 @@ impl AnyAgent {
             escalation_stream_fn: None,
             escalation_provider_name: None,
             context_depth_reminder_threshold: None,
+            max_turns: None,
         }
+    }
+
+    /// dirge-nqr: install the per-run assistant-turn cap. `None`
+    /// clears any previous cap (unlimited). Forwarded to
+    /// `LoopSpawnConfig.max_turns` at spawn time.
+    pub fn with_max_turns(mut self, max_turns: Option<usize>) -> Self {
+        self.max_turns = max_turns;
+        self
     }
 
     /// Phase 4 part 1: wire the dual-client escalation route.
@@ -867,9 +880,13 @@ impl AnyAgent {
     pub async fn run_print(
         &self,
         prompt: &str,
-        _max_turns: usize,
+        max_turns: usize,
         output_format: crate::cli::OutputFormat,
     ) -> anyhow::Result<String> {
+        // dirge-nqr: honor the cap explicitly even if the agent was
+        // built with a different one. `run_print` is the headless
+        // entry point — callers explicitly pass the cap they want.
+        let agent = self.clone().with_max_turns(Some(max_turns));
         let start_instant = std::time::Instant::now();
         let session_id = runner::uuid_v4_simple();
         let mut num_turns: u32 = 0;
@@ -912,10 +929,9 @@ impl AnyAgent {
 
         // Wire through the new agent_loop path: clone the agent (cheap
         // — Arc internals + refcounts), spawn a runner, and drain the
-        // event channel collecting text.
-        let runner = self
-            .clone()
-            .spawn_runner(effective_prompt.clone(), Vec::new(), None);
+        // event channel collecting text. Use the max_turns-stamped
+        // `agent` from above so the cap is honored.
+        let runner = agent.spawn_runner(effective_prompt.clone(), Vec::new(), None);
         let task = runner.task;
         let mut event_rx = runner.event_rx;
 
@@ -1149,6 +1165,9 @@ impl AnyAgent {
         cfg.file_touch_tracker = self
             .context_depth_reminder_threshold
             .map(|t| crate::agent::agent_loop::context_depth::FileTouchTracker::new(t, prompt));
+        // dirge-nqr: forward the per-run turn cap. `None` keeps the
+        // legacy unlimited behavior.
+        cfg.max_turns = self.max_turns;
         #[cfg(feature = "plugin")]
         {
             cfg.plugin_mgr = crate::plugin::hook::global();
@@ -1587,6 +1606,14 @@ pub async fn build_agent(
     if let Some(threshold) = cfg.resolve_context_depth_threshold() {
         agent = agent.with_context_depth_reminder(threshold);
     }
+
+    // dirge-nqr — per-run assistant-turn cap. CLI `--max-agent-turns`
+    // > config `max_agent_turns` > default 100 (matches the existing
+    // `cli::resolve_max_agent_turns` precedence). Always set: the
+    // loop already had an implicit cap inherited from the legacy rig
+    // builder; this wires it through the agent_loop path so `run_print`
+    // and the interactive flow both honor it.
+    agent = agent.with_max_turns(Some(cli.resolve_max_agent_turns(cfg)));
 
     agent
 }

@@ -79,6 +79,7 @@ fn build_config() -> LoopConfig {
         escalation_max_per_session: 3,
         escalation_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(3)),
         file_touch_tracker: None,
+        max_turns: None,
     }
 }
 
@@ -863,4 +864,114 @@ async fn kwz_repair_exhaustion_arms_escalation_stream() {
         }
     }
     assert!(saw_escalation, "expected EscalationActivated event");
+}
+
+// ===============================================================
+// dirge-nqr — max_turns cap actually terminates the run
+// ===============================================================
+
+/// LoopConfig.max_turns = Some(2). The mock stream emits a tool
+/// call on EVERY turn (would otherwise loop forever). After two
+/// assistant turns complete, the loop should terminate with the
+/// max-turns notice appended to new_messages.
+#[tokio::test]
+async fn nqr_max_turns_cap_terminates_run() {
+    let tool = std::sync::Arc::new(RecordingTool::new("echo"));
+    let mut ctx = empty_context();
+    ctx.tools.push(tool.clone());
+
+    // Stream emits tool calls indefinitely — the cap should bite.
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_clone = calls.clone();
+    let stream: StreamFn = std::sync::Arc::new(move |_ctx, _opts| {
+        let n = calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id = format!("call-{n}");
+        Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message: tool_use_response(&id, "echo", serde_json::json!({"i": n})),
+            usage: None,
+        }]))
+    });
+
+    let mut cfg = build_config();
+    cfg.max_turns = Some(2);
+
+    let (tx, mut rx) = mpsc::channel::<LoopEvent>(128);
+    let messages = run_agent_loop(
+        vec![user("loop forever")],
+        ctx,
+        cfg,
+        AbortSignal::new(),
+        &tx,
+        &stream,
+        None,
+    )
+    .await;
+    drop(tx);
+
+    // Stream invoked exactly max_turns times (no more).
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // Last message is the dirge-nqr cap-reached notice.
+    let last = messages.last().expect("at least one message");
+    let role = last.role();
+    assert_eq!(role, "user");
+    let LoopMessage::User(u) = last else {
+        panic!("expected user message, got {role:?}");
+    };
+    assert!(
+        u.content.contains("Max agent turns"),
+        "cap notice missing: {:?}",
+        u.content
+    );
+
+    // agent_end still fires after the cap.
+    let kinds: Vec<&str> = drain(&mut rx).await.iter().map(|e| e.kind()).collect();
+    assert_eq!(kinds.last().copied(), Some("agent_end"));
+}
+
+/// Default behavior (max_turns = None) is unchanged: the loop
+/// runs until the stream itself stops asking for tool calls.
+#[tokio::test]
+async fn nqr_unlimited_when_max_turns_none() {
+    let tool = std::sync::Arc::new(RecordingTool::new("echo"));
+    let mut ctx = empty_context();
+    ctx.tools.push(tool.clone());
+
+    // Tool call, then text response — no cap should be needed.
+    let stream = scripted_stream(vec![
+        vec![StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message: tool_use_response("call-1", "echo", serde_json::json!({})),
+            usage: None,
+        }],
+        vec![StreamEvent::Done {
+            reason: StopReason::Stop,
+            message: text_response("done"),
+            usage: None,
+        }],
+    ]);
+
+    let cfg = build_config(); // max_turns: None
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
+    let messages = run_agent_loop(
+        vec![user("hi")],
+        ctx,
+        cfg,
+        AbortSignal::new(),
+        &tx,
+        &stream,
+        None,
+    )
+    .await;
+
+    // No cap notice present.
+    for m in &messages {
+        if let LoopMessage::User(u) = m {
+            assert!(
+                !u.content.contains("Max agent turns"),
+                "unexpected cap notice"
+            );
+        }
+    }
 }
