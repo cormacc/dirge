@@ -10,6 +10,7 @@ pub mod mcp;
 #[cfg(feature = "acp")]
 pub mod acp;
 
+pub mod cross_session_extractor;
 pub mod dirge_paths;
 pub mod memory_curator;
 pub mod memory_provider;

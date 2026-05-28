@@ -504,6 +504,144 @@ pub(crate) async fn run_memory_curator_review(
     }
 }
 
+/// dirge-6js7: awaitable core of the cross-session insight
+/// extraction LLM pass. The mechanical scan
+/// (`CrossSessionExtractor::run_mechanical_scan`) already surfaced
+/// recurring (≥2-session) themes absent from MEMORY.md and bundled
+/// their snippets. This feeds them — plus the verbatim current
+/// memory snapshot as "ALREADY KNOWN" — to a memory-only forked
+/// runner that decides whether any durable cross-session pattern
+/// warrants a new entry.
+///
+/// Reuses `spawn_memory_curator_runner` (memory-only allow-list)
+/// + the `AbortRunnerOnDrop` guard, and writes `LLM_REPORT.md`
+/// under `.dirge/memory/.cross_session_reports/{ts}/`.
+pub(crate) async fn run_cross_session_extraction(
+    agent: AnyAgent,
+    paths: crate::extras::dirge_paths::ProjectPaths,
+    bundle: crate::extras::cross_session_extractor::CrossSessionBundle,
+) {
+    let memory_md = std::fs::read_to_string(paths.memory_file("MEMORY.md")).unwrap_or_default();
+    let pitfalls_md = std::fs::read_to_string(paths.memory_file("PITFALLS.md")).unwrap_or_default();
+    let prompt = format!(
+        "{}\n\n## ALREADY KNOWN — MEMORY.md\n\n{}\n\n## ALREADY KNOWN — PITFALLS.md\n\n{}\n\n## Recurring cross-session themes (candidates)\n{}",
+        crate::extras::cross_session_extractor::CROSS_SESSION_PROMPT,
+        if memory_md.trim().is_empty() {
+            "_(empty)_"
+        } else {
+            memory_md.trim_end()
+        },
+        if pitfalls_md.trim().is_empty() {
+            "_(empty)_"
+        } else {
+            pitfalls_md.trim_end()
+        },
+        bundle.llm_input,
+    );
+
+    let started = std::time::SystemTime::now();
+    let started_iso = chrono::Utc::now().to_rfc3339();
+    let started_filename = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let themes = bundle.themes.clone();
+
+    // Memory-only runner + abort-on-drop guard (see
+    // run_background_review).
+    let runner = agent.spawn_memory_curator_runner(prompt, String::new());
+    let crate::agent::runner::AgentRunner {
+        event_rx,
+        task,
+        cancel_tx,
+        ..
+    } = runner;
+    let _abort_guard = AbortRunnerOnDrop { task, cancel_tx };
+    let mut rx = event_rx;
+    let mut tool_actions: Vec<String> = Vec::new();
+    let mut error_msg: Option<String> = None;
+    while let Some(event) = rx.recv().await {
+        use crate::event::AgentEvent;
+        match event {
+            AgentEvent::Error(msg) => {
+                tracing::warn!(
+                    target: "dirge::cross_session",
+                    error = %msg,
+                    "Cross-session extraction encountered an error",
+                );
+                error_msg.get_or_insert_with(|| msg.to_string());
+            }
+            AgentEvent::ToolCall { name, .. } => {
+                tool_actions.push(name.to_string());
+            }
+            AgentEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+
+    let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    if error_msg.is_none() {
+        let summary = if tool_actions.is_empty() {
+            "no-op (nothing durable to promote)".to_string()
+        } else {
+            format!("{} memory write(s)", tool_actions.len())
+        };
+        tracing::info!(
+            target: "dirge::cross_session",
+            actions = %summary,
+            elapsed = %elapsed_secs,
+            themes = %themes.len(),
+            "🔗 Cross-session extraction: {summary}",
+        );
+    }
+
+    // Audit report.
+    use std::fmt::Write as _;
+    let mut md = String::new();
+    let _ = writeln!(md, "# Cross-session extraction — LLM pass\n");
+    let _ = writeln!(md, "- Started: {started_iso}");
+    let _ = writeln!(md, "- Elapsed: {elapsed_secs:.2}s");
+    let _ = writeln!(
+        md,
+        "- Outcome: {}",
+        if error_msg.is_some() {
+            "error"
+        } else if tool_actions.is_empty() {
+            "no-op (nothing durable to promote)"
+        } else {
+            "added memory entries"
+        }
+    );
+    if let Some(err) = &error_msg {
+        let _ = writeln!(md, "- Error: `{err}`");
+    }
+    let _ = writeln!(md, "- Memory writes: {}", tool_actions.len());
+    if !themes.is_empty() {
+        let _ = writeln!(md, "\n## Candidate themes given to the LLM\n");
+        let _ = writeln!(md, "| Theme | Distinct sessions |");
+        let _ = writeln!(md, "|---|---|");
+        for t in &themes {
+            let _ = writeln!(md, "| {} | {} |", t.label, t.session_count);
+        }
+    }
+    let report_dir = paths
+        .memory_dir()
+        .join(".cross_session_reports")
+        .join(&started_filename);
+    if let Err(e) = std::fs::create_dir_all(&report_dir) {
+        tracing::warn!(
+            target: "dirge::cross_session",
+            error = %e,
+            "Failed to create cross-session LLM report directory",
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(report_dir.join("LLM_REPORT.md"), md) {
+        tracing::warn!(
+            target: "dirge::cross_session",
+            error = %e,
+            "Failed to write cross-session LLM report",
+        );
+    }
+}
+
 /// dirge-5cm9 / dirge-5gn6 / dirge-bx4g — fire the provider's
 /// `on_session_end` hook when a memory provider is attached. The
 /// hook receives the full transcript built from `session.messages`

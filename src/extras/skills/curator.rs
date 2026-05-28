@@ -112,22 +112,37 @@ impl Curator {
         })
     }
 
-    /// Check whether the curator should run now, based on:
-    /// 1. Interval gate (last run was >= INTERVAL_HOURS ago)
-    /// 2. Idle gate (no activity for >= IDLE_HOURS — simplified
-    ///    check: we just use the interval as a proxy since we don't
-    ///    track session-level idle time yet)
-    /// 3. First-run deferral (don't run on first check — seed state)
-    pub fn should_run_now(&self) -> bool {
-        let now = now_secs();
-
-        // Never run on the first check — just seed the state.
-        if self.state.last_run.is_none() {
-            return false;
+    /// Check whether the curator should run now.
+    /// 1. First-run deferral — on the first-ever check, SEED the
+    ///    clock (persist `last_run = now`) and return false, so the
+    ///    pass first runs one interval after install.
+    /// 2. Interval gate — afterwards, run when the last run was
+    ///    >= INTERVAL_HOURS ago.
+    ///
+    /// dirge-6js7 fix: this previously returned false on the first
+    /// check WITHOUT persisting anything. Since the only code that
+    /// sets `last_run` lives inside the gated `apply_automatic_transitions`,
+    /// `last_run` stayed `None` forever and the curator DEADLOCKED —
+    /// it never ran in production. Seeding here breaks the deadlock.
+    /// Takes `&mut self` because seeding is a persisted side effect.
+    pub fn should_run_now(&mut self) -> bool {
+        match self.state.last_run {
+            None => {
+                self.state.last_run = Some(now_secs());
+                if let Err(e) = self.state.save(&self.state_path) {
+                    tracing::debug!(
+                        target: "dirge::curator",
+                        error = %e,
+                        "failed to seed curator state on first check",
+                    );
+                }
+                false
+            }
+            Some(last) => {
+                let elapsed = Duration::from_secs(now_secs().saturating_sub(last));
+                elapsed >= Duration::from_secs(INTERVAL_HOURS * 3600)
+            }
         }
-
-        let elapsed = Duration::from_secs(now - self.state.last_run.unwrap());
-        elapsed >= Duration::from_secs(INTERVAL_HOURS * 3600)
     }
 
     /// Run automatic lifecycle transitions on all skills.
@@ -629,10 +644,23 @@ mod tests {
     // ── should_run_now ─────────────────────────────────
 
     #[test]
-    fn first_run_never_runs() {
+    fn first_run_seeds_and_defers() {
         let (paths, _dir) = temp_project();
-        let curator = Curator::new(&paths).unwrap();
+        let state_path = paths.skills_dir().join(".curator_state");
+        let mut curator = Curator::new(&paths).unwrap();
         assert!(!curator.should_run_now(), "first check should defer");
+        // dirge-6js7 deadlock fix: the first check must persist the
+        // seeded clock. Previously it returned false without saving,
+        // so last_run stayed None forever and the curator never ran.
+        assert!(
+            state_path.exists(),
+            "first check must persist seeded state (deadlock fix)",
+        );
+        let seeded = CuratorState::load(&state_path).unwrap();
+        assert!(
+            seeded.last_run.is_some(),
+            "first check must seed last_run so the interval clock starts",
+        );
     }
 
     #[test]
@@ -646,7 +674,7 @@ mod tests {
         state.last_run = Some(past);
         state.save(&state_path).unwrap();
 
-        let curator = Curator::new(&paths).unwrap();
+        let mut curator = Curator::new(&paths).unwrap();
         assert!(curator.should_run_now());
     }
 
@@ -661,7 +689,7 @@ mod tests {
         state.last_run = Some(recent);
         state.save(&state_path).unwrap();
 
-        let curator = Curator::new(&paths).unwrap();
+        let mut curator = Curator::new(&paths).unwrap();
         assert!(!curator.should_run_now());
     }
 

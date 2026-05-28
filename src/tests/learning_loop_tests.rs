@@ -476,7 +476,7 @@ fn session_search_browse_dedupes_lineage() {
 #[test]
 fn curator_state_persistence() {
     let (paths, _dir) = temp_project();
-    let curator = Curator::new(&paths).unwrap();
+    let mut curator = Curator::new(&paths).unwrap();
     // First run should not execute (seed-only).
     assert!(!curator.should_run_now(), "first check should defer");
 }

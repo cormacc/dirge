@@ -159,16 +159,34 @@ impl MemoryCurator {
         })
     }
 
-    /// Should the curator run now? `false` on first-ever check
-    /// (seeds the state without running) and during the 7-day
-    /// interval gate.
-    pub fn should_run_now(&self) -> bool {
-        let now = now_secs();
-        let Some(last) = self.state.last_run else {
-            return false; // first-run defer; seed via run_mechanical_pass
-        };
-        let elapsed = Duration::from_secs(now.saturating_sub(last));
-        elapsed >= Duration::from_secs(INTERVAL_HOURS * 3600)
+    /// Should the curator run now? On the first-ever check, SEED
+    /// the clock (persist `last_run = now`) and return false, so the
+    /// pass first runs one interval after install; afterwards, run
+    /// when the last run was >= 7 days ago.
+    ///
+    /// dirge-6js7 fix: previously returned false on first check
+    /// WITHOUT seeding, so `last_run` stayed `None` forever and the
+    /// curator DEADLOCKED (the only seeder, `run_mechanical_pass`,
+    /// is gated behind this check). Takes `&mut self` because
+    /// seeding is a persisted side effect.
+    pub fn should_run_now(&mut self) -> bool {
+        match self.state.last_run {
+            None => {
+                self.state.last_run = Some(now_secs());
+                if let Err(e) = self.state.save(&self.state_path) {
+                    tracing::debug!(
+                        target: "dirge::memory_curator",
+                        error = %e,
+                        "failed to seed memory curator state on first check",
+                    );
+                }
+                false
+            }
+            Some(last) => {
+                let elapsed = Duration::from_secs(now_secs().saturating_sub(last));
+                elapsed >= Duration::from_secs(INTERVAL_HOURS * 3600)
+            }
+        }
     }
 
     /// Run the mechanical pass: reconcile telemetry sidecar
@@ -521,14 +539,24 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    /// First-ever check seeds state but does NOT run.
+    /// First-ever check SEEDS state (persists last_run) and does
+    /// NOT run. dirge-6js7 deadlock fix: previously the first check
+    /// returned false without persisting, so last_run stayed None
+    /// forever and the curator never ran.
     #[test]
-    fn should_run_now_returns_false_on_first_check() {
+    fn should_run_now_seeds_and_defers_on_first_check() {
         let (paths, _tmp) = temp_project();
-        let curator = MemoryCurator::new(&paths).unwrap();
+        let state_path = paths.memory_dir().join(".curator_state");
+        let mut curator = MemoryCurator::new(&paths).unwrap();
+        assert!(!curator.should_run_now(), "first check defers");
         assert!(
-            !curator.should_run_now(),
-            "first check must seed state without running (mirrors skills curator)",
+            state_path.exists(),
+            "first check must persist seeded state (deadlock fix)",
+        );
+        let seeded = MemoryCuratorState::load(&state_path).unwrap();
+        assert!(
+            seeded.last_run.is_some(),
+            "first check must seed last_run so the interval clock starts",
         );
     }
 
@@ -544,7 +572,7 @@ mod tests {
         };
         std::fs::create_dir_all(paths.memory_dir()).unwrap();
         just_ran.save(&state_path).unwrap();
-        let curator = MemoryCurator::new(&paths).unwrap();
+        let mut curator = MemoryCurator::new(&paths).unwrap();
         assert!(
             !curator.should_run_now(),
             "must respect 7-day interval gate",
@@ -563,7 +591,7 @@ mod tests {
         };
         std::fs::create_dir_all(paths.memory_dir()).unwrap();
         stale.save(&state_path).unwrap();
-        let curator = MemoryCurator::new(&paths).unwrap();
+        let mut curator = MemoryCurator::new(&paths).unwrap();
         assert!(curator.should_run_now(), "after 8 days the gate must open");
     }
 
