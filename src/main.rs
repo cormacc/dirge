@@ -57,6 +57,21 @@ struct Channels {
     lsp_manager: Option<std::sync::Arc<LspManager>>,
 }
 
+/// Resolve the session id passed to `build_agent` for the
+/// session-search tool's current-session exclusion. dirge-sk3e:
+/// `--no-session` (one-shot prompts that aren't persisted) yields
+/// `None` so the tool doesn't try to exclude a row that will never
+/// land in the session DB. Otherwise the live session id is
+/// returned so the model can't recall its own in-progress
+/// prompt-response pair.
+fn session_id_for_agent(cli: &cli::Cli, session: &session::Session) -> Option<String> {
+    if cli.no_session {
+        None
+    } else {
+        Some(session.id.to_string())
+    }
+}
+
 fn resolve_mode(cli: &cli::Cli, cfg: &config::Config) -> SecurityMode {
     // Warn on conflicting CLI flags. Previously `--yolo --restrictive`
     // silently picked yolo (the first-match in the if-else chain)
@@ -749,6 +764,7 @@ async fn main() -> anyhow::Result<()> {
     let completion_model = client.completion_model(model.to_string());
 
     if cli.print {
+        let session_id_for_print = session_id_for_agent(&cli, &session);
         let agent = provider::build_agent(
             completion_model,
             &cli,
@@ -766,7 +782,7 @@ async fn main() -> anyhow::Result<()> {
             mcp_manager.as_ref(),
             #[cfg(feature = "semantic")]
             semantic_manager.as_ref(),
-            Some(session.id.to_string()),
+            session_id_for_print,
         )
         .await;
         let msg = cli.message.join(" ");
@@ -1161,5 +1177,52 @@ async fn run_headless_loop(
         }
 
         eprintln!("--- iteration {} complete, looping ---\n", state.iteration);
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn fresh_session() -> session::Session {
+        session::Session::new("openrouter", "anthropic/claude-sonnet-4.5", 200_000)
+    }
+
+    /// dirge-sk3e — `--no-session` yields `None` so the
+    /// session-search tool doesn't try to exclude an id that will
+    /// never land in the DB.
+    #[test]
+    fn no_session_yields_none() {
+        let cli = cli::Cli::parse_from(["dirge", "--no-session", "--print"]);
+        let session = fresh_session();
+        assert_eq!(
+            session_id_for_agent(&cli, &session),
+            None,
+            "--no-session must yield None"
+        );
+    }
+
+    /// Sessioned runs still exclude the live session so the model
+    /// can't see its own in-progress turn in `session_search`.
+    #[test]
+    fn sessioned_print_yields_some() {
+        let cli = cli::Cli::parse_from(["dirge", "--print"]);
+        let session = fresh_session();
+        let got = session_id_for_agent(&cli, &session);
+        assert_eq!(
+            got.as_deref(),
+            Some(session.id.as_str()),
+            "sessioned --print must propagate the live session id"
+        );
+    }
+
+    /// Interactive (no --print, no --no-session) also gets Some.
+    #[test]
+    fn interactive_yields_some() {
+        let cli = cli::Cli::parse_from(["dirge"]);
+        let session = fresh_session();
+        let got = session_id_for_agent(&cli, &session);
+        assert_eq!(got.as_deref(), Some(session.id.as_str()));
     }
 }
