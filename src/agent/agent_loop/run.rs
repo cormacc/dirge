@@ -376,15 +376,12 @@ pub async fn run_agent_loop(
 pub async fn run_loop(
     mut current_context: Context,
     mut new_messages: Vec<LoopMessage>,
-    // `config` is `mut` even though phase 4 only reads it. Pi
-    // mutates it at agent-loop.ts:229 (`config = { ...config,
-    // model: ..., reasoning: ... }`) for the prepareNextTurn
-    // model/thinking swap. Phase 4 lands the hook signature and
-    // the placeholder fields; phase 4.5 will actually assign
-    // through this binding. Keeping `mut` here matches pi's
-    // shape and avoids needing to retype the parameter when the
-    // assignment site activates.
-    #[allow(unused_mut)] mut config: LoopConfig,
+    // `config` is `mut`: the `prepareNextTurn` hook assigns
+    // `config.reasoning` (the thinking-level swap) through this
+    // binding, matching pi's `config = { ...config, reasoning }`
+    // at agent-loop.ts:229. (Model swap is not yet wired — see
+    // the `prepare_next_turn` handler below.)
+    mut config: LoopConfig,
     signal: AbortSignal,
     emit: &mpsc::Sender<LoopEvent>,
     stream_fn: &StreamFn,
@@ -844,34 +841,36 @@ pub async fn run_loop(
                     if let Some(new_ctx) = update.context {
                         current_context = new_ctx;
                     }
-                    // Pi lines 229-238 rebuild config with the
-                    // new model / reasoning. Doing that in Rust
-                    // requires re-building the `StreamFn` closure
-                    // (which has the CompletionModel baked in at
-                    // construction by `rig_stream_fn_from_model`).
-                    // The StreamFn isn't part of LoopConfig — it's
-                    // passed to `run_loop` separately — so we
-                    // can't swap it mid-run without restructuring
-                    // the loop's surface.
-                    //
-                    // Surface a warning so users wiring this hook
-                    // know their swap was ignored. Code-review
-                    // gap #3: lift this when a real consumer
-                    // needs mid-run model swap; the fix is to
-                    // accept a `Fn(Context) -> StreamFn` factory
-                    // instead of a single StreamFn.
+                    // dirge-6js7 plugin review: apply the requested
+                    // thinking level to subsequent turns.
+                    // `config.reasoning` is read per-turn when
+                    // building `StreamOptions` (stream.rs:173) and
+                    // mapped into the provider request, so reassigning
+                    // it here takes effect on the NEXT stream call —
+                    // pi's `prepareNextTurn` thinking-swap semantics
+                    // (agent-loop.ts:229). Previously this value was
+                    // dropped with a "not yet wired" warning, making
+                    // the plugin `harness/set-next-thinking-level`
+                    // slot a silent no-op in the pi-style loop.
+                    if let Some(level) = update.thinking_level {
+                        config.reasoning = Some(level);
+                        tracing::debug!(
+                            target: "dirge::agent_loop",
+                            thinking = ?level,
+                            "prepareNextTurn applied a new thinking_level for the next turn",
+                        );
+                    }
+                    // Mid-run MODEL swap still requires restructuring
+                    // the loop to accept a `Fn(Context) -> StreamFn`
+                    // factory (the StreamFn bakes the CompletionModel
+                    // at construction and isn't part of LoopConfig).
+                    // Tracked separately; warn so a plugin author
+                    // knows the model swap was ignored.
                     if let Some(model) = &update.model {
                         tracing::warn!(
                             target: "dirge::agent_loop",
                             requested_model = %model,
-                            "prepareNextTurn returned a new model but mid-run swap is not yet wired — ignoring",
-                        );
-                    }
-                    if let Some(level) = &update.thinking_level {
-                        tracing::warn!(
-                            target: "dirge::agent_loop",
-                            requested_thinking = ?level,
-                            "prepareNextTurn returned a new thinking_level but mid-run swap is not yet wired — ignoring",
+                            "prepareNextTurn returned a new model but mid-run model swap is not yet wired — ignoring",
                         );
                     }
                 }

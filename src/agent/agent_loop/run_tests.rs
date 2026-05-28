@@ -501,6 +501,89 @@ async fn test_prepare_next_turn_snapshot_applied() {
     );
 }
 
+/// dirge-6js7 plugin review: prepareNextTurn returning a new
+/// thinking_level must actually be APPLIED to the next turn's
+/// stream call (config.reasoning), not dropped with a warning.
+/// This is the fix for the HIGH "looks present but doesn't fire"
+/// finding — the plugin `harness/set-next-thinking-level` slot
+/// flows through prepare_next_turn into the live loop.
+#[tokio::test]
+async fn prepare_next_turn_applies_thinking_level_to_next_turn() {
+    use crate::agent::agent_loop::types::ThinkingLevel;
+
+    let echo = std::sync::Arc::new(EchoTool::new());
+    let mut ctx = empty_context();
+    ctx.tools.push(echo.clone());
+
+    // Record the `reasoning` (thinking level) seen at each LLM call.
+    let observed_reasoning = std::sync::Arc::new(Mutex::new(Vec::<Option<ThinkingLevel>>::new()));
+    let observed_clone = observed_reasoning.clone();
+    let counter = std::sync::Arc::new(AtomicUsize::new(0));
+    let factory: StreamFn = std::sync::Arc::new(move |_llm_ctx, opts| {
+        observed_clone.lock().unwrap().push(opts.reasoning);
+        let n = counter.fetch_add(1, Ordering::SeqCst);
+        // Turn 1 calls a tool (loop continues); turn 2 finishes.
+        let msg = if n == 0 {
+            tool_use_response("call-1", "echo", serde_json::json!({"v": 1}))
+        } else {
+            text_response("done")
+        };
+        let reason = msg.stop_reason;
+        Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+            reason,
+            message: msg,
+            usage: None,
+        }]))
+    });
+
+    // Hook fires after turn 1 and requests a thinking-level swap.
+    let fired = std::sync::Arc::new(AtomicUsize::new(0));
+    let fired_clone = fired.clone();
+    let hook: PrepareNextTurnFn = std::sync::Arc::new(move |_ctx| {
+        let fired = fired_clone.clone();
+        Box::pin(async move {
+            if fired.fetch_add(1, Ordering::SeqCst) > 0 {
+                return None;
+            }
+            Some(TurnUpdate {
+                thinking_level: Some(ThinkingLevel::High),
+                ..Default::default()
+            })
+        })
+    });
+
+    let mut config = build_config();
+    config.prepare_next_turn = Some(hook);
+    // Start with no reasoning set so the swap is observable.
+    config.reasoning = None;
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
+    let _ = run_agent_loop(
+        vec![user("go")],
+        ctx,
+        config,
+        AbortSignal::new(),
+        &tx,
+        &factory,
+        None,
+        None,
+    )
+    .await;
+
+    let observed = observed_reasoning.lock().unwrap().clone();
+    assert_eq!(observed.len(), 2, "expected 2 LLM calls");
+    assert_eq!(
+        observed[0], None,
+        "turn 1 runs with the initial reasoning (none)"
+    );
+    assert_eq!(
+        observed[1],
+        Some(ThinkingLevel::High),
+        "turn 2 must see the thinking_level prepareNextTurn requested — \
+         pre-fix this was dropped and turn 2 saw None",
+    );
+}
+
 /// Port of pi test "should stop after the current turn when
 /// shouldStopAfterTurn returns true" (agent-loop.test.ts:970).
 #[tokio::test]
