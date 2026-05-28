@@ -1,150 +1,49 @@
-# Storyboard 04 — `/compress <focus>` Hermes-style focus compaction
+# `/compress <focus>` focus-topic compaction
 
-## Scenario
+The user runs `/compress permission layer refactor`. The text after
+the command becomes the focus topic. The compactor produces a summary
+that allocates ~60-70% of its budget to the focus topic and one-line
+each to the other threads. The summary replaces older turns; the
+recent tail is preserved.
 
-The user has been pair-programming for two hours. The session covers
-three unrelated subtasks: an MCP debugging foray, refactoring the
-permission layer, and adding LSP features. They want to wrap up the
-permission refactor and keep working — but the conversation is
-pressing the context window. The other two threads are tangentially
-useful but not essential.
+## Flow
 
-They run:
+1. User submits `/compress permission layer refactor`.
+2. Slash parser joins `parts[1..]` into the focus string and returns
+   a `DEFER_COMPRESS:<focus>` sentinel.
+3. `handle_compress` selects `messages_to_summarize` (everything below
+   the tail that fits in `keep_recent_tokens`) and calls
+   `compress_messages(model, msgs, prev_summary, Some(focus))`.
+4. `compress_messages` builds an `instructions_block` with the focus
+   framing and substitutes it into `COMPACTION_PROMPT`.
+5. Summarizer runs against the configured auxiliary model. The
+   prompt is head-tail truncated to 128 KiB if oversized.
+6. `handle_compress` pushes the summary into `session.compactions`
+   and rewrites `session.messages` to keep head + summary + tail.
+7. Next `convert_history` emits `Message::system("[Previous
+   conversation summary]\n…")` plus the preserved tail.
 
-```
-/compress permission layer refactor
-```
+## Implementation
 
-The compactor produces a summary that gives ~65% of its budget to
-permission-layer details (file paths, function names, decisions,
-test names) and one-line each to the MCP and LSP threads.
+- `src/ui/slash/mod.rs` — `/compress` / `/compact` parsing; emits
+  `DEFER_COMPRESS:<focus>` sentinel.
+- `src/ui/slash/mod.rs::handle_compress` — selects messages, calls
+  the provider, writes the summary into the session.
+- `src/provider/mod.rs::compress_messages` — focus framing in
+  `instructions_block`; substitutes into `COMPACTION_PROMPT`.
+- `src/agent/compression::build_summary_prompt` — direct Rust-built
+  prompt for the auto-compact path; accepts `focus_topic`.
+- `src/agent/compression::run_compaction_pass_with_focus` —
+  loop-driven auto-compact at >75% context usage.
+- `src/session/mod.rs::Session::compacted_context` — reads compaction
+  for prompt assembly.
 
-## What the user sees
+## Edge cases
 
-```
-> /compress permission layer refactor
-compressing...
-
-[compact summary]
-## Goal
-The user is refactoring the permission layer to add
-…
-```
-
-After completion:
-
-```
-░ compacted 1 times (saved ~12483 tokens)
-```
-
-Subsequent turns see the summary as a system-prefixed message and
-the recent tail of original turns; older turns are gone.
-
-## Code trace
-
-### Step 1 — Slash command parses the focus argument
-
-- `src/ui/slash/mod.rs:402`:
-  ```rust
-  "/compress" | "/compact" => {
-      let instructions = if parts.len() > 1 {
-          Some(parts[1..].join(" "))
-      } else {
-          None
-      };
-      return Err(anyhow::anyhow!("DEFER_COMPRESS:{}", instr_str));
-  }
-  ```
-- `parts` is the whitespace-split command. For
-  `/compress permission layer refactor`, `parts[1..]` is
-  `["permission", "layer", "refactor"]` joined into
-  `"permission layer refactor"`.
-- The `DEFER_COMPRESS:<focus>` sentinel is caught upstream and
-  routed to `handle_compress` with the focus as `instructions`.
-
-### Step 2 — `handle_compress` builds the prompt
-
-- `handle_compress` (`src/ui/slash/mod.rs:151`) is the OLD per-session
-  flow. It selects `messages_to_summarize` (everything below the
-  tail that fits in `keep_recent_tokens`) and calls
-  `client.compress_messages(model, msgs, prev_summary, Some("permission layer refactor"))`.
-
-### Step 3 — `compress_messages` applies the focus framing
-
-- `src/provider/mod.rs:451-477`:
-  ```rust
-  let instructions_block = match instructions {
-      Some(text) if !text.trim().is_empty() => format!(
-          "FOCUS TOPIC: \"{}\"\n\
-           The user has requested that this compaction PRIORITISE \
-           preserving all information related to the focus topic …\
-           The focus topic sections should receive roughly 60-70% \
-           of the summary token budget. …\n\
-           NEVER preserve API keys, tokens, passwords, or \
-           credentials — use [REDACTED].",
-          text.trim(),
-          text.trim(),
-      ),
-      _ => "(none)".to_string(),
-  };
-  ```
-- Verbatim port of `hermes-agent/agent/context_compressor.py:1050-1054`.
-- Substituted into `COMPACTION_PROMPT`'s `{instructions}` placeholder.
-
-### Step 4 — Summarizer runs
-
-- `summarize::summarize_with_model` invokes the configured
-  auxiliary model (typically the same as the agent model).
-- PROV-9: if the assembled prompt exceeds 128 KiB it's
-  head_tail_truncated (40% head, 60% tail, newline-aligned)
-  before dispatch.
-- Standard retry policy applies — network / rate-limit errors
-  get the same backoff as agent turns.
-
-### Step 5 — Apply the summary
-
-- `handle_compress` pushes a system message with the summary into
-  `session.compactions` and rewrites `session.messages` to keep
-  only the head + summary + tail.
-- The next `convert_history` call (when a new prompt is submitted)
-  reads the compaction via `session.compacted_context()` and emits
-  `Message::system("[Previous conversation summary]\n…")` plus the
-  preserved tail.
-
-## How this differs from the agent-loop auto-compaction path
-
-There are TWO compaction paths in dirge:
-
-| Path | Trigger | Function | Prompt source |
-|---|---|---|---|
-| Slash `/compress` | Explicit user command | `handle_compress` → `client.compress_messages` | `COMPACTION_PROMPT` template + focus framing in `{instructions}` |
-| Loop auto-compact | Loop usage decision at >75% context | `run_compaction_pass_with_focus` → `compression::build_summary_prompt` | Direct Rust-built Hermes prompt with `focus_topic` parameter |
-
-Both paths now honor focus_topic in the same Hermes-style framing.
-The slash command's text-after-the-command is treated as the focus.
-
-## Coverage
-
-- Hermes parity: prompt template wording verbatim ported from
-  `context_compressor.py:1050-1054`.
-- `agent::compression::tests::full_compaction_wire_with_mock_summarizer`
-  exercises the agent-loop path with a mock summarizer.
-- The slash-command path is tested via the existing
-  `handle_compress` integration tests in `src/ui/slash/mod.rs`.
-
-## Edge cases verified
-
-- **Empty focus** (`/compress` with no args): `instructions = None`
-  → `{instructions}` placeholder gets `"(none)"`. The Hermes
-  framing block is NOT emitted; the summary defaults to the
-  general structure.
-- **Whitespace-only focus** (`/compress     `): the `text.trim()`
-  empties; same as empty focus path.
-- **Focus containing quotes**: `text.trim()` is interpolated raw
-  into the prompt string. The model sees the literal quotes; not
-  exploitable (the prompt is going to an LLM, not a shell).
-- **Focus + previous compaction**: the previous summary is fed in
-  via `previous_summary` parameter, and `build_summary_prompt`'s
-  "update an existing summary" branch fires. The focus framing
-  is appended to BOTH the new-summary and update-summary
-  branches.
+- Empty or whitespace-only focus: `text.trim()` is empty →
+  `instructions_block` is `"(none)"`; default summary structure.
+- Focus containing quotes: interpolated raw; the LLM sees the literal
+  quotes.
+- Focus + previous compaction: previous summary is fed via
+  `previous_summary`; the update-summary branch fires; focus framing
+  applies to both new-summary and update-summary branches.

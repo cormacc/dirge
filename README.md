@@ -28,14 +28,14 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 
 ### Robust agent loop
 
-A multi-phase hardening pass against the failure modes that plague long sessions and weaker models. See [`docs/AGENTIC_LOOP_PLAN.md`](docs/AGENTIC_LOOP_PLAN.md) for the full design.
+Hardening against the failure modes that plague long sessions and weaker models. See [`docs/agent-loop.md`](docs/agent-loop.md) for the architecture and [`docs/tool-input-repair.md`](docs/tool-input-repair.md) for the repair layer.
 
 - **Tool-input repair layer**: catches and fixes common malformed tool calls before they hit the tool — strips `null` optional fields, parses JSON-string arrays, unwraps markdown links in path fields, applies relational defaults declared in the tool's schema. Failed repairs emit a structured `tool_input_invalid` log with the original args.
 - **Schema-aware contract hints** (`dirge-hints`): per-tool schemas can declare `semantic: "absolute_path"`, `relational: [{requires, defaults}]`, etc. The repair layer reads these to drive automatic defaults + agent-facing `Note:` text — removing per-tool hardcoded heuristics.
 - **Tree-sitter pre-write validation**: every `write` / `edit` / `apply_patch` is parsed through the matching tree-sitter grammar before bytes hit disk. Syntactically-broken code is rejected with line/column-precise errors so the model corrects it on the same turn. Languages: Rust, TS/TSX, Python, Go, Ruby, Java, C, C++, Clojure, Bash (each gated on its `semantic-<lang>` feature).
 - **Dynamic `tool_search`** (opt-in via `dynamic_tool_search: true`): ships only `tool_search` + a small always-on set in each request; the model calls `tool_search(query)` to discover and load more tools on demand. ~30% token savings on MCP-heavy sessions.
 - **Disk-backed large-output relay**: `bash` / `webfetch` outputs over an inline budget (default 8 KiB) are written to `~/.dirge/transient/<pid>/<tool>-<ts>.txt` and replaced with a head + ellipsis + tail summary plus a hint to `read` for specifics. Aged cleanup runs on every relay write.
-- **Anthropic prompt-cache positioning**: system prompt + tool defs sit at the start of every request (cache-warm prefix); a `prompt_cache_prefix` tracing event emits per-turn with stable hashes so unexpected prefix drift is observable. See [`docs/PROMPT_CACHE_AUDIT.md`](docs/PROMPT_CACHE_AUDIT.md).
+- **Anthropic prompt-cache positioning**: system prompt + tool defs sit at the start of every request (cache-warm prefix); a `prompt_cache_prefix` tracing event emits per-turn with stable hashes so unexpected prefix drift is observable.
 - **Dual-client tiering** (`escalation_provider` role): when a tool input fails to repair OR generated code fails the tree-sitter pre-write check, the next model call is routed through a more capable provider. One-shot per failure, capped at 3 per session, surfaced as a dim `↑ escalating to <provider>` status line.
 - **Context-depth reminders** (`context_depth_reminder_threshold`): tracks consecutive turns that touch the same file(s); when the streak crosses the threshold (default 8, opt-in), injects a single mid-turn reminder restating the active task + touched files so long runs don't drift.
 - **Tool-loop circuit breaker**: per-tool-call repeat counter trips on the 3rd identical `(tool, input)` within a 32-call window — catches non-progressing loops without needing model cooperation.
@@ -302,7 +302,7 @@ A minimal plugin:
     (harness/notify "running with security mindset" :info)))
 ```
 
-**See [`docs/PLUGINS.md`](docs/PLUGINS.md)** for the complete plugin author's guide — hook reference, the full `harness/*` API surface (logging, tool interception, dialogs, custom commands, renderers, providers, session-tree control), worked examples, and debugging tips.
+**See [`docs/plugins.md`](docs/plugins.md)** for the complete plugin author's guide — hook reference, the full `harness/*` API surface (logging, tool interception, dialogs, custom commands, renderers, providers, session-tree control), worked examples, and debugging tips.
 
 Example plugins in [`plugins/`](plugins/):
 
@@ -418,7 +418,7 @@ dirge ships with an 80s-CRT phosphor green palette by default. To opt out, set `
 
 Errors stay red and warnings stay yellow under every theme — those colors are part of the load-bearing semantic contract.
 
-For custom themes, create `~/.config/dirge/<name>.theme.json` with overrides for any subset of the palette (named colors, hex `#rrggbb`, or 256-color indices), then set `theme: "<name>"` in `config.json`. See [`docs/THEMES.md`](docs/THEMES.md) for the full schema and examples.
+For custom themes, create `~/.config/dirge/<name>.theme.json` with overrides for any subset of the palette (named colors, hex `#rrggbb`, or 256-color indices), then set `theme: "<name>"` in `config.json`. See [`docs/themes.md`](docs/themes.md) for the full schema and examples.
 
 ## Supported providers
 
