@@ -589,6 +589,64 @@ mod tests {
         );
     }
 
+    /// dirge-mifq — Subagents spawned by `TaskTool` go through
+    /// `AnyModel::btw_query`, which builds a fresh rig agent from
+    /// the model alone with NO tools attached. This pins the
+    /// invariant: TaskTool itself must not hold a tool registry,
+    /// session_id, agent handle, or any state that would let a
+    /// subagent reach the parent's `session_search`, `memory`, or
+    /// `skill` tools. If a future change adds tools to subagents,
+    /// the session-search-includes-current-session class of bugs
+    /// (dirge-502b) re-emerges and the new tools must be considered
+    /// for session_id propagation.
+    ///
+    /// The compiler enforces this — adding a `tools: ...` field to
+    /// `TaskTool` would not break this test directly, but the
+    /// review surface forces the change to be visible. If you do
+    /// add tool support to subagents, also (a) audit btw_query for
+    /// session_search wiring, (b) decide subagent session_id
+    /// policy (inherit parent? Fresh? Excluded?), (c) update this
+    /// test to cover the new shape.
+    #[test]
+    fn subagent_path_is_stateless_no_session_search_leakage() {
+        // The fields a TaskTool legitimately holds today. Anything
+        // beyond this set is a red flag for subagent-tool leakage.
+        // (Using `_ =` to silence the dead-binding lint while
+        // documenting the inventory.)
+        let _expected_fields = ["permission", "ask_tx", "model", "bg_store", "chat_sink"];
+
+        // Construct a TaskTool — if a future field is required,
+        // this won't compile until the new field is provided. That
+        // failure mode points the reader at this test, which then
+        // forces the session_id audit per the docstring above.
+        let _tool: TaskTool = mock_tool();
+
+        // The btw_query path lives in provider/mod.rs. The build
+        // inside it is `AgentBuilder::new(m).preamble(...).build()`
+        // with no `.tool(...)` calls — verify by source inspection
+        // that no tool-attaching call has crept in.
+        let provider_src = include_str!("../../provider/mod.rs");
+        let btw_idx = provider_src
+            .find("pub async fn btw_query")
+            .expect("btw_query must exist in provider/mod.rs");
+        let btw_end = provider_src[btw_idx..]
+            .find("\n    }\n")
+            .map(|i| btw_idx + i)
+            .unwrap_or(provider_src.len());
+        let btw_body = &provider_src[btw_idx..btw_end];
+        assert!(
+            !btw_body.contains(".tool("),
+            "btw_query must not attach tools to the subagent — that would \
+             require auditing session_id propagation per dirge-mifq. \
+             Source snippet:\n{btw_body}"
+        );
+        assert!(
+            !btw_body.contains(".tools("),
+            "btw_query must not attach tools to the subagent — that would \
+             require auditing session_id propagation per dirge-mifq."
+        );
+    }
+
     #[tokio::test]
     async fn definition_advertises_background_field() {
         let tool = mock_tool();
