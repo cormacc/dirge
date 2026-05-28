@@ -108,9 +108,14 @@ pub trait MemoryProvider: Send + Sync {
 
 /// Implementing `MemoryProvider` on the dirge built-in
 /// `MemoryToolStore` makes it the canonical backend without changing
-/// any of its existing public methods. Plugin providers can wrap a
-/// store via a delegating impl if they want to keep file persistence
-/// while augmenting with side effects (e.g. mirroring to a remote).
+/// any of its existing public methods.
+///
+/// dirge-5feg: this impl deliberately does NOT call `on_memory_write`
+/// from inside `add`/`replace`/`remove`. The `MemoryTool::call`
+/// dispatcher fires the hook once after every successful CRUD so
+/// custom providers (and providers that wrap this one) get the hook
+/// fired exactly once at the tool layer, without each impl having to
+/// remember to do so.
 impl MemoryProvider for super::memory_store::MemoryToolStore {
     fn name(&self) -> &str {
         "builtin"
@@ -125,22 +130,15 @@ impl MemoryProvider for super::memory_store::MemoryToolStore {
     }
 
     fn add(&self, target: &str, content: &str) -> Result<Value, String> {
-        let result = super::memory_store::MemoryToolStore::add(self, target, content)?;
-        self.on_memory_write("add", target, content);
-        Ok(result)
+        super::memory_store::MemoryToolStore::add(self, target, content)
     }
 
     fn replace(&self, target: &str, old_text: &str, content: &str) -> Result<Value, String> {
-        let result =
-            super::memory_store::MemoryToolStore::replace(self, target, old_text, content)?;
-        self.on_memory_write("replace", target, content);
-        Ok(result)
+        super::memory_store::MemoryToolStore::replace(self, target, old_text, content)
     }
 
     fn remove(&self, target: &str, old_text: &str) -> Result<Value, String> {
-        let result = super::memory_store::MemoryToolStore::remove(self, target, old_text)?;
-        self.on_memory_write("remove", target, old_text);
-        Ok(result)
+        super::memory_store::MemoryToolStore::remove(self, target, old_text)
     }
 }
 
@@ -154,8 +152,10 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// A minimal test provider that records writes to a vec. Proves
-    /// the trait is implementable outside the built-in store.
+    /// dirge-5feg — A minimal test provider that records hook
+    /// invocations only. Per the new contract, its CRUD methods
+    /// MUST NOT self-fire `on_memory_write` — the `MemoryTool`
+    /// layer fires once after each successful CRUD.
     #[derive(Default)]
     struct RecordingProvider {
         writes: Mutex<Vec<(String, String, String)>>,
@@ -168,16 +168,13 @@ mod tests {
         fn view(&self, _target: &str) -> Value {
             Value::Null
         }
-        fn add(&self, target: &str, content: &str) -> Result<Value, String> {
-            self.on_memory_write("add", target, content);
+        fn add(&self, _: &str, _: &str) -> Result<Value, String> {
             Ok(Value::Null)
         }
-        fn replace(&self, target: &str, _old: &str, content: &str) -> Result<Value, String> {
-            self.on_memory_write("replace", target, content);
+        fn replace(&self, _: &str, _: &str, _: &str) -> Result<Value, String> {
             Ok(Value::Null)
         }
-        fn remove(&self, target: &str, old: &str) -> Result<Value, String> {
-            self.on_memory_write("remove", target, old);
+        fn remove(&self, _: &str, _: &str) -> Result<Value, String> {
             Ok(Value::Null)
         }
         fn on_memory_write(&self, action: &str, target: &str, content: &str) {
@@ -189,22 +186,41 @@ mod tests {
     }
 
     #[test]
-    fn alternative_provider_receives_on_memory_write() {
+    fn provider_crud_does_not_self_fire_on_memory_write() {
+        // Per the dirge-5feg contract: the provider's CRUD methods
+        // must NOT call on_memory_write directly. Only the tool
+        // layer fires it. Verified here by calling the provider's
+        // methods directly (bypassing the tool) — the writes vec
+        // must stay empty.
         let p = RecordingProvider::default();
         let _ = p.add("memory", "hello");
-        let _ = p.replace("memory", "hello", "world");
-        let _ = p.remove("pitfalls", "world");
+        let _ = p.replace("memory", "old", "hello");
+        let _ = p.remove("pitfalls", "old");
 
         let writes = p.writes.lock().unwrap();
-        assert_eq!(writes.len(), 3);
+        assert!(
+            writes.is_empty(),
+            "providers must NOT self-fire on_memory_write \
+             (the tool layer does); got: {:?}",
+            *writes
+        );
+    }
+
+    #[test]
+    fn external_on_memory_write_call_records() {
+        // The hook can still be called explicitly by the tool
+        // layer or by tests — this verifies the recording surface
+        // works when invoked from outside the CRUD path.
+        let p = RecordingProvider::default();
+        p.on_memory_write("add", "memory", "hello");
+        p.on_memory_write("remove", "pitfalls", "hello");
+
+        let writes = p.writes.lock().unwrap();
+        assert_eq!(writes.len(), 2);
         assert_eq!(writes[0], ("add".into(), "memory".into(), "hello".into()));
         assert_eq!(
             writes[1],
-            ("replace".into(), "memory".into(), "world".into())
-        );
-        assert_eq!(
-            writes[2],
-            ("remove".into(), "pitfalls".into(), "world".into())
+            ("remove".into(), "pitfalls".into(), "hello".into())
         );
     }
 

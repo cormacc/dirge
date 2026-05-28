@@ -110,6 +110,11 @@ ACTIONS:
                 Ok(serde_json::to_string_pretty(&resp)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
             }
+            // dirge-5feg: the tool layer fires `on_memory_write`
+            // exactly once after each successful CRUD, regardless of
+            // which provider impl handled the call. Providers are
+            // forbidden from calling the hook themselves to avoid
+            // double-firing through wrappers.
             "add" => {
                 let content = args
                     .content
@@ -117,6 +122,7 @@ ACTIONS:
                     .filter(|c| !c.trim().is_empty())
                     .ok_or_else(|| ToolError::Msg("content is required for 'add'".to_string()))?;
                 let resp = self.store.add(target, content).map_err(ToolError::Msg)?;
+                self.store.on_memory_write("add", target, content);
                 Ok(serde_json::to_string_pretty(&resp)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
             }
@@ -139,6 +145,7 @@ ACTIONS:
                     .store
                     .replace(target, old_text, content)
                     .map_err(ToolError::Msg)?;
+                self.store.on_memory_write("replace", target, content);
                 Ok(serde_json::to_string_pretty(&resp)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
             }
@@ -154,6 +161,7 @@ ACTIONS:
                     .store
                     .remove(target, old_text)
                     .map_err(ToolError::Msg)?;
+                self.store.on_memory_write("remove", target, old_text);
                 Ok(serde_json::to_string_pretty(&resp)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()))
             }
@@ -476,6 +484,100 @@ mod tests {
                 "remove:memory:new".to_string(),
             ],
             "custom provider must receive every tool call verbatim"
+        );
+    }
+
+    /// dirge-5feg — the tool layer fires `on_memory_write` exactly
+    /// once per successful CRUD, regardless of whether the
+    /// provider's CRUD impl self-fired. `view` does NOT fire the
+    /// hook (it's not a write).
+    #[test]
+    fn integration_tool_layer_fires_on_memory_write_once_per_crud() {
+        use crate::extras::memory_provider::MemoryProvider;
+        use serde_json::json;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct RecordingHookProvider {
+            hooks: Mutex<Vec<(String, String, String)>>,
+        }
+        impl MemoryProvider for RecordingHookProvider {
+            fn name(&self) -> &str {
+                "hook-recorder"
+            }
+            // CRUD impls deliberately do NOT call on_memory_write —
+            // the tool layer is supposed to.
+            fn view(&self, _: &str) -> serde_json::Value {
+                json!({ "entries": [] })
+            }
+            fn add(&self, _: &str, _: &str) -> Result<serde_json::Value, String> {
+                Ok(json!({ "success": true }))
+            }
+            fn replace(&self, _: &str, _: &str, _: &str) -> Result<serde_json::Value, String> {
+                Ok(json!({ "success": true }))
+            }
+            fn remove(&self, _: &str, _: &str) -> Result<serde_json::Value, String> {
+                Ok(json!({ "success": true }))
+            }
+            fn on_memory_write(&self, action: &str, target: &str, content: &str) {
+                self.hooks
+                    .lock()
+                    .unwrap()
+                    .push((action.into(), target.into(), content.into()));
+            }
+        }
+
+        let provider = Arc::new(RecordingHookProvider::default());
+        let tool = MemoryTool::new(provider.clone() as Arc<dyn MemoryProvider>, None, None);
+        let rt = make_runtime();
+
+        // view does NOT fire the hook.
+        rt.block_on(tool.call(Args {
+            action: "view".into(),
+            target: "memory".into(),
+            content: None,
+            old_text: None,
+        }))
+        .unwrap();
+        assert!(
+            provider.hooks.lock().unwrap().is_empty(),
+            "view must not fire on_memory_write"
+        );
+
+        // add → one fire with the content.
+        rt.block_on(tool.call(Args {
+            action: "add".into(),
+            target: "memory".into(),
+            content: Some("alpha".into()),
+            old_text: None,
+        }))
+        .unwrap();
+        // replace → one fire with the new content.
+        rt.block_on(tool.call(Args {
+            action: "replace".into(),
+            target: "memory".into(),
+            content: Some("beta".into()),
+            old_text: Some("alpha".into()),
+        }))
+        .unwrap();
+        // remove → one fire with the old_text (no new content).
+        rt.block_on(tool.call(Args {
+            action: "remove".into(),
+            target: "pitfalls".into(),
+            content: None,
+            old_text: Some("beta".into()),
+        }))
+        .unwrap();
+
+        let hooks = provider.hooks.lock().unwrap();
+        assert_eq!(
+            *hooks,
+            vec![
+                ("add".into(), "memory".into(), "alpha".into()),
+                ("replace".into(), "memory".into(), "beta".into()),
+                ("remove".into(), "pitfalls".into(), "beta".into()),
+            ],
+            "tool layer must fire on_memory_write exactly once per CRUD"
         );
     }
 
