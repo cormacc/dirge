@@ -223,7 +223,11 @@ pub fn spawn_background_review(
 /// Skips entirely (logs at debug) when the candidate list contains
 /// the "No agent-created skills" sentinel — there's nothing to
 /// consolidate.
-pub fn spawn_curator_review(agent: AnyAgent, candidate_list: String) {
+pub fn spawn_curator_review(
+    agent: AnyAgent,
+    paths: crate::extras::dirge_paths::ProjectPaths,
+    candidate_list: String,
+) {
     if candidate_list.contains("No agent-created skills") {
         tracing::debug!(
             target: "dirge::curator",
@@ -238,6 +242,11 @@ pub fn spawn_curator_review(agent: AnyAgent, candidate_list: String) {
         candidate_list
     );
 
+    // Snapshot the before-state so the post-run REPORT.md can diff.
+    let before_candidates = candidate_list.clone();
+    let started = std::time::SystemTime::now();
+    let started_rfc = chrono::Utc::now().to_rfc3339();
+
     tokio::spawn(async move {
         // dirge-yai1: skill-only runner — memory tool is filtered
         // out at the registry level so the curator can't write
@@ -245,7 +254,7 @@ pub fn spawn_curator_review(agent: AnyAgent, candidate_list: String) {
         let runner = agent.spawn_curator_runner(prompt, String::new());
         let mut rx = runner.event_rx;
         let mut tool_actions: Vec<String> = Vec::new();
-        let mut had_error = false;
+        let mut error_msg: Option<String> = None;
         while let Some(event) = rx.recv().await {
             use crate::event::AgentEvent;
             match event {
@@ -255,7 +264,7 @@ pub fn spawn_curator_review(agent: AnyAgent, candidate_list: String) {
                         error = %msg,
                         "Curator LLM pass encountered an error"
                     );
-                    had_error = true;
+                    error_msg.get_or_insert_with(|| msg.to_string());
                 }
                 AgentEvent::ToolCall { name, .. } => {
                     tool_actions.push(name.to_string());
@@ -265,7 +274,7 @@ pub fn spawn_curator_review(agent: AnyAgent, candidate_list: String) {
             }
         }
 
-        if !had_error && !tool_actions.is_empty() {
+        if error_msg.is_none() && !tool_actions.is_empty() {
             let summary = tool_actions
                 .iter()
                 .fold(Vec::<&str>::new(), |mut acc, a| {
@@ -281,6 +290,47 @@ pub fn spawn_curator_review(agent: AnyAgent, candidate_list: String) {
                 "🗂  Skill curator pass: {}",
                 summary
             );
+        }
+
+        // dirge-3m4h: write a REPORT.md so users have an audit
+        // trail of what the curator did. Re-render the candidate
+        // list AFTER the pass to capture the post-consolidation
+        // shape — the LLM may have created umbrellas, archived
+        // siblings, etc.
+        let paths_for_report = paths.clone();
+        let after_candidates = tokio::task::spawn_blocking(move || {
+            crate::extras::skills::usage::UsageStore::load(&paths_for_report)
+                .ok()
+                .map(|store| crate::extras::skills::curator::render_candidate_list(&store))
+                .unwrap_or_else(|| String::from("(failed to render after-state)"))
+        })
+        .await
+        .unwrap_or_else(|_| String::from("(blocking task failed)"));
+
+        let elapsed_secs = started.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let report = crate::extras::skills::curator::CuratorReport {
+            started_at_rfc3339: started_rfc,
+            elapsed_secs,
+            before_candidates,
+            after_candidates,
+            tool_actions,
+            error: error_msg,
+        };
+        match crate::extras::skills::curator::write_curator_report(&paths, &report) {
+            Ok(run_dir) => {
+                tracing::info!(
+                    target: "dirge::curator",
+                    run_dir = %run_dir.display(),
+                    "Curator report written"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "dirge::curator",
+                    error = %e,
+                    "Failed to write curator report (continuing)"
+                );
+            }
         }
     });
 }

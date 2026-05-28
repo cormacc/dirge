@@ -555,7 +555,11 @@ pub(crate) async fn handle_done(
                 .flatten();
 
                 if let Some(candidates) = candidate_list {
-                    crate::agent::review::spawn_curator_review(curator_agent, candidates);
+                    crate::agent::review::spawn_curator_review(
+                        curator_agent,
+                        curator_paths.clone(),
+                        candidates,
+                    );
                 }
             }
         });

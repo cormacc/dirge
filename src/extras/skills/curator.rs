@@ -402,6 +402,162 @@ pub fn render_candidate_list(usage: &crate::extras::skills::usage::UsageStore) -
     out
 }
 
+// ── Per-run report (dirge-3m4h) ───────────────────────
+
+/// One curator-run audit record. Port of hermes
+/// `_write_run_report` (curator.py:970-1146), simplified — dirge
+/// stores Markdown only (no JSON sidecar) and a compact diff
+/// instead of full SKILL.md snapshots.
+#[derive(Debug, Clone)]
+pub struct CuratorReport {
+    pub started_at_rfc3339: String,
+    pub elapsed_secs: f64,
+    /// Rendered candidate list BEFORE the LLM pass — the input
+    /// the model was given.
+    pub before_candidates: String,
+    /// Rendered candidate list AFTER the pass — useful to
+    /// eyeball what the model actually did.
+    pub after_candidates: String,
+    /// Tool-call names the model fired, in order. Duplicates
+    /// preserved so the reader can see fan-out.
+    pub tool_actions: Vec<String>,
+    /// Optional error message captured from the agent stream.
+    pub error: Option<String>,
+}
+
+impl CuratorReport {
+    /// Render as Markdown for human consumption. Sections:
+    /// metadata header, tool-action histogram, diff
+    /// (removed/added/state-transition counts), before/after
+    /// candidate dumps. Best-effort — never panics on malformed
+    /// inputs.
+    pub fn to_markdown(&self) -> String {
+        use std::collections::BTreeMap;
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        let _ = writeln!(out, "# Curator run report\n");
+        let _ = writeln!(out, "- Started: {}", self.started_at_rfc3339);
+        let _ = writeln!(out, "- Elapsed: {:.2}s", self.elapsed_secs);
+        let _ = writeln!(
+            out,
+            "- Outcome: {}",
+            if self.error.is_some() {
+                "error"
+            } else if self.tool_actions.is_empty() {
+                "no-op"
+            } else {
+                "modified skills"
+            }
+        );
+        if let Some(err) = &self.error {
+            let _ = writeln!(out, "- Error: `{}`", err);
+        }
+
+        // Tool-action histogram.
+        let mut histogram: BTreeMap<&str, usize> = BTreeMap::new();
+        for action in &self.tool_actions {
+            *histogram.entry(action.as_str()).or_insert(0) += 1;
+        }
+        if !histogram.is_empty() {
+            let _ = writeln!(out, "\n## Tool calls\n");
+            for (name, count) in &histogram {
+                let _ = writeln!(out, "- `{}` × {}", name, count);
+            }
+        }
+
+        // Diff: extract skill names from each rendered list and
+        // compute set deltas. The renderer prefixes each row with
+        // "  - <name>  ".
+        let before_names = parse_candidate_names(&self.before_candidates);
+        let after_names = parse_candidate_names(&self.after_candidates);
+        let removed: Vec<&String> = before_names.difference(&after_names).collect();
+        let added: Vec<&String> = after_names.difference(&before_names).collect();
+        if !removed.is_empty() || !added.is_empty() {
+            let _ = writeln!(out, "\n## Skill set delta\n");
+            if !removed.is_empty() {
+                let _ = writeln!(out, "Archived ({}):", removed.len());
+                let mut sorted = removed.clone();
+                sorted.sort();
+                for name in sorted {
+                    let _ = writeln!(out, "- ~~`{}`~~", name);
+                }
+            }
+            if !added.is_empty() {
+                let _ = writeln!(out, "\nAdded ({}):", added.len());
+                let mut sorted = added.clone();
+                sorted.sort();
+                for name in sorted {
+                    let _ = writeln!(out, "- **`{}`**", name);
+                }
+            }
+        }
+
+        let _ = writeln!(out, "\n## Candidate list — before\n\n```");
+        out.push_str(&self.before_candidates);
+        if !self.before_candidates.ends_with('\n') {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "```\n");
+
+        let _ = writeln!(out, "## Candidate list — after\n\n```");
+        out.push_str(&self.after_candidates);
+        if !self.after_candidates.ends_with('\n') {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "```");
+
+        out
+    }
+}
+
+/// Extract `<name>` tokens from a rendered candidate list row of
+/// the form `"  - <name>  state=..."`. Used by the diff logic in
+/// `CuratorReport::to_markdown`.
+fn parse_candidate_names(rendered: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for line in rendered.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("- ")
+            && let Some(name) = rest.split_whitespace().next()
+        {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// Persist a curator report to
+/// `.dirge/skills/.curator_reports/{timestamp}/REPORT.md`.
+/// Returns the run directory path on success. Best-effort — the
+/// caller logs and continues if the write fails.
+pub fn write_curator_report(
+    paths: &ProjectPaths,
+    report: &CuratorReport,
+) -> Result<PathBuf, String> {
+    let root = paths.skills_dir().join(".curator_reports");
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("Failed to create curator reports dir: {e}"))?;
+
+    // Stamp directory: YYYYMMDD-HHMMSS. Append a disambiguator if
+    // a rerun lands in the same second.
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut run_dir = root.join(&stamp);
+    let mut suffix = 1;
+    while run_dir.exists() {
+        suffix += 1;
+        run_dir = root.join(format!("{}-{}", stamp, suffix));
+    }
+    std::fs::create_dir_all(&run_dir)
+        .map_err(|e| format!("Failed to create curator run dir: {e}"))?;
+
+    let md = report.to_markdown();
+    let report_path = run_dir.join("REPORT.md");
+    std::fs::write(&report_path, md.as_bytes())
+        .map_err(|e| format!("Failed to write REPORT.md: {e}"))?;
+    Ok(run_dir)
+}
+
 // ── Helpers ───────────────────────────────────────────
 
 fn now_secs() -> u64 {
@@ -626,6 +782,123 @@ mod tests {
             text.contains("last_activity="),
             "missing last_activity column"
         );
+    }
+
+    // ── dirge-3m4h: curator REPORT.md ─────────────────────
+
+    fn sample_report() -> CuratorReport {
+        CuratorReport {
+            started_at_rfc3339: "2026-05-28T09:00:00Z".into(),
+            elapsed_secs: 12.5,
+            before_candidates: "Candidate skills (agent-created, sorted by last activity):\n  \
+                                - alpha  state=active  pinned=no  use=1  view=2  patches=0  last_activity=never\n  \
+                                - beta-narrow  state=stale  pinned=no  use=0  view=0  patches=0  last_activity=never\n"
+                .into(),
+            after_candidates: "Candidate skills (agent-created, sorted by last activity):\n  \
+                               - alpha  state=active  pinned=no  use=1  view=2  patches=1  last_activity=never\n  \
+                               - alpha-umbrella  state=active  pinned=no  use=0  view=0  patches=0  last_activity=never\n"
+                .into(),
+            tool_actions: vec![
+                "skill".into(),
+                "skill".into(),
+                "skill".into(),
+            ],
+            error: None,
+        }
+    }
+
+    #[test]
+    fn curator_report_markdown_includes_all_sections() {
+        let md = sample_report().to_markdown();
+        // Metadata header
+        assert!(md.contains("# Curator run report"), "missing title");
+        assert!(md.contains("2026-05-28T09:00:00Z"), "missing start time");
+        assert!(md.contains("12.50s"), "missing elapsed seconds");
+        assert!(md.contains("modified skills"), "missing outcome line");
+
+        // Tool histogram
+        assert!(md.contains("## Tool calls"), "missing tool section");
+        assert!(md.contains("`skill` × 3"), "missing histogram entry");
+
+        // Diff: beta-narrow was archived; alpha-umbrella added.
+        assert!(md.contains("## Skill set delta"), "missing delta section");
+        assert!(md.contains("Archived (1):"), "missing archived header");
+        assert!(md.contains("~~`beta-narrow`~~"), "missing archived entry");
+        assert!(md.contains("Added (1):"), "missing added header");
+        assert!(md.contains("**`alpha-umbrella`**"), "missing added entry");
+
+        // Before/after dumps
+        assert!(
+            md.contains("## Candidate list — before"),
+            "missing before dump"
+        );
+        assert!(
+            md.contains("## Candidate list — after"),
+            "missing after dump"
+        );
+    }
+
+    #[test]
+    fn curator_report_renders_no_op_when_no_tool_calls() {
+        let mut r = sample_report();
+        r.tool_actions.clear();
+        // No diff between before/after either.
+        r.after_candidates = r.before_candidates.clone();
+        let md = r.to_markdown();
+        assert!(md.contains("no-op"), "outcome must show no-op");
+        assert!(
+            !md.contains("## Tool calls"),
+            "no-op runs must omit the tool section"
+        );
+        assert!(
+            !md.contains("## Skill set delta"),
+            "no-op runs must omit the delta section"
+        );
+    }
+
+    #[test]
+    fn curator_report_renders_error_outcome() {
+        let mut r = sample_report();
+        r.error = Some("provider returned 503".into());
+        let md = r.to_markdown();
+        assert!(md.contains("Outcome: error"), "outcome must show error");
+        assert!(md.contains("`provider returned 503`"), "error must appear");
+    }
+
+    #[test]
+    fn write_curator_report_creates_timestamped_dir() {
+        let (paths, dir) = temp_project();
+        let report = sample_report();
+        let run_dir = write_curator_report(&paths, &report).expect("write");
+
+        assert!(run_dir.exists(), "run dir must exist");
+        assert!(
+            run_dir.starts_with(paths.skills_dir().join(".curator_reports")),
+            "report must live under .dirge/skills/.curator_reports: {}",
+            run_dir.display()
+        );
+        let report_md = run_dir.join("REPORT.md");
+        assert!(report_md.exists(), "REPORT.md must be written");
+        let body = std::fs::read_to_string(&report_md).expect("read");
+        assert!(body.contains("# Curator run report"));
+        assert!(body.contains("alpha-umbrella"));
+
+        // Cleanup.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_curator_report_handles_same_second_reruns() {
+        let (paths, dir) = temp_project();
+        let report = sample_report();
+        let first = write_curator_report(&paths, &report).expect("first write");
+        let second = write_curator_report(&paths, &report).expect("second write");
+        assert_ne!(
+            first, second,
+            "back-to-back writes must land in distinct dirs"
+        );
+        assert!(first.exists() && second.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
