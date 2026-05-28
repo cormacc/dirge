@@ -509,6 +509,19 @@ pub async fn run_loop(
                 pending_messages.clear();
             }
 
+            // dirge-k6be: cap oversized tool results in the
+            // transcript before every model send. Reasonix
+            // parity at `loop.ts:486-503` (`healActiveLogBeforeSend`).
+            // Idempotent; cheap walk when nothing's over the cap.
+            // The fold pass (75% trigger) still does aggressive
+            // 1-line summarization — this cap is the per-result
+            // safety net so a single 50KB tool output doesn't
+            // dominate the prompt until fold fires.
+            current_context.messages = crate::agent::compression::cap_oversized_tool_results(
+                &current_context.messages,
+                crate::agent::compression::TURN_END_RESULT_CAP_TOKENS,
+            );
+
             // Pi lines 192-194: LLM call.
             let (assistant_msg, token_usage) = stream_assistant_response(
                 &mut current_context,

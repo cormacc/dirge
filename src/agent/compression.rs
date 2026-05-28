@@ -65,6 +65,16 @@ const MIN_SUMMARY_TOKENS: u64 = 2000;
 const SUMMARY_RATIO: f64 = 0.20;
 const SUMMARY_TOKENS_CEILING: u64 = 12_000;
 
+/// dirge-k6be: per-tool-result token cap applied at every
+/// turn-end before the next model send. Port of Reasonix's
+/// `TURN_END_RESULT_CAP_TOKENS` (docs/ARCHITECTURE.md §4.2).
+/// 3000 tokens ≈ 12 KB at the 4-chars-per-token estimate;
+/// the model that called the tool already received its full
+/// result on the dispatch turn, subsequent turns see a
+/// head+tail truncation with a count of dropped tokens so
+/// the model can re-call if it needs more.
+pub const TURN_END_RESULT_CAP_TOKENS: u64 = 3000;
+
 /// Chars-per-token rough estimate. Port of Hermes's _CHARS_PER_TOKEN.
 const CHARS_PER_TOKEN: u64 = 4;
 
@@ -101,6 +111,180 @@ pub fn estimate_messages_tokens(messages: &[Value]) -> u64 {
         })
         .sum();
     (total_chars as u64).div_ceil(CHARS_PER_TOKEN)
+}
+
+/// dirge-k6be: per-tool-result token cap. Truncates any
+/// `role: "tool"` / `role: "toolResult"` message whose string
+/// content exceeds `max_tokens`, replacing it with a head +
+/// truncation marker + tail payload. Returns a new `Vec` —
+/// the input slice is not mutated.
+///
+/// Port of Reasonix `shrinkOversizedToolResultsByTokens`
+/// (`loop/shrink.ts:34-62`). Differences from
+/// `prune_tool_outputs`:
+/// - Token-bound, not chars (CHARS_PER_TOKEN estimator).
+/// - Non-destructive: head + tail preserved with a marker,
+///   no LLM summarization.
+/// - No tail protection: applies to every position (the
+///   model that called the tool already received the full
+///   result on the dispatch turn).
+/// - String-content only: structured-content messages are
+///   skipped (out of scope; their truncation strategy
+///   depends on block semantics).
+///
+/// Intended to run BEFORE every model send, idempotent so
+/// repeat passes on already-capped results are no-ops.
+pub fn cap_oversized_tool_results(messages: &[Value], max_tokens: u64) -> Vec<Value> {
+    let max_chars = max_tokens.saturating_mul(CHARS_PER_TOKEN) as usize;
+    if max_chars == 0 {
+        return messages.to_vec();
+    }
+    messages
+        .iter()
+        .map(|msg| {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role != "tool" && role != "toolResult" {
+                return msg.clone();
+            }
+            let Some(content) = msg.get("content") else {
+                return msg.clone();
+            };
+            match content {
+                // Heal-on-load shape: scalar string content.
+                Value::String(s) => {
+                    if s.len() <= max_chars {
+                        return msg.clone();
+                    }
+                    let mut new_msg = msg.clone();
+                    new_msg["content"] = Value::String(truncate_with_head_tail(s, max_chars));
+                    new_msg
+                }
+                // Production shape: array of content blocks
+                // (`[{type: "text", text: "..."}, ...]`). Sum
+                // text-block lengths to compute the total the
+                // model would see; cap each oversized text block
+                // independently using a per-block budget that
+                // shares the total fairly. Non-text blocks
+                // (image, tool_use, etc.) pass through.
+                Value::Array(blocks) => {
+                    let total_text_len: usize = blocks
+                        .iter()
+                        .filter_map(text_of_block)
+                        .map(|t| t.len())
+                        .sum();
+                    if total_text_len <= max_chars {
+                        return msg.clone();
+                    }
+                    // Single-block fast path: cap directly to
+                    // max_chars. (Common: tool result is one
+                    // text block.)
+                    let text_block_count =
+                        blocks.iter().filter(|b| text_of_block(b).is_some()).count();
+                    let per_block_budget = if text_block_count == 0 {
+                        return msg.clone();
+                    } else {
+                        std::cmp::max(max_chars / text_block_count, MIN_PER_BLOCK_BUDGET)
+                    };
+                    let new_blocks: Vec<Value> = blocks
+                        .iter()
+                        .map(|b| {
+                            let Some(text) = text_of_block(b) else {
+                                return b.clone();
+                            };
+                            if text.len() <= per_block_budget {
+                                return b.clone();
+                            }
+                            let truncated = truncate_with_head_tail(text, per_block_budget);
+                            let mut new_block = b.clone();
+                            new_block["text"] = Value::String(truncated);
+                            new_block
+                        })
+                        .collect();
+                    let mut new_msg = msg.clone();
+                    new_msg["content"] = Value::Array(new_blocks);
+                    new_msg
+                }
+                _ => msg.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Minimum per-block content budget when splitting `max_chars`
+/// across multiple text blocks. Ensures each block can hold at
+/// least the marker payload — without this floor a
+/// many-blocks message could produce empty truncations.
+const MIN_PER_BLOCK_BUDGET: usize = 256;
+
+/// Extract the `.text` field from a `{type: "text", text: "..."}`
+/// content block. `None` for non-text blocks (image, tool_use…).
+fn text_of_block(block: &Value) -> Option<&str> {
+    let obj = block.as_object()?;
+    if obj.get("type").and_then(|t| t.as_str())? != "text" {
+        return None;
+    }
+    obj.get("text").and_then(|t| t.as_str())
+}
+
+/// Build a `head + marker + tail` payload sized so the
+/// total length is `<= max_chars`. Tail gets 10% of the
+/// remaining content budget (capped at 1024 chars to keep
+/// deeply-nested file dumps from eating the whole tail
+/// allotment). Port of Reasonix `truncateForModel`
+/// (`mcp/registry.ts:254-262`).
+///
+/// Sized for idempotency: a second pass on the output is a
+/// no-op because `output.len() <= max_chars` guarantees the
+/// outer `content.len() <= max_chars` early-return fires.
+fn truncate_with_head_tail(s: &str, max_chars: usize) -> String {
+    // Reserve enough budget for the marker (with worst-case
+    // 12-digit dropped count). The marker template stays
+    // constant; the dropped-count is the only variable.
+    const MARKER_OVERHEAD: usize = 160;
+    if max_chars <= MARKER_OVERHEAD {
+        // Cap too small for both content and a marker; emit
+        // just the marker so downstream callers still see
+        // "result was truncated".
+        return format!(
+            "[…truncated {} chars — call the tool with a narrower scope (filter, head, pagination) if you need more…]",
+            s.len(),
+        );
+    }
+    let content_budget = max_chars - MARKER_OVERHEAD;
+    let tail_budget = std::cmp::min(1024, content_budget / 10);
+    let head_budget = content_budget.saturating_sub(tail_budget);
+    let head_end = char_boundary_at_or_before(s, head_budget);
+    let tail_start = char_boundary_at_or_after(s, s.len().saturating_sub(tail_budget));
+    let head = &s[..head_end];
+    let tail = &s[tail_start..];
+    let dropped = s.len().saturating_sub(head.len() + tail.len());
+    format!(
+        "{head}\n\n[…truncated {dropped} chars — call the tool with a narrower scope (filter, head, pagination) if you need more…]\n\n{tail}"
+    )
+}
+
+/// Largest byte index `<= n` that's on a UTF-8 char boundary.
+fn char_boundary_at_or_before(s: &str, n: usize) -> usize {
+    if n >= s.len() {
+        return s.len();
+    }
+    let mut i = n;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest byte index `>= n` that's on a UTF-8 char boundary.
+fn char_boundary_at_or_after(s: &str, n: usize) -> usize {
+    if n >= s.len() {
+        return s.len();
+    }
+    let mut i = n;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// Prune large tool outputs in the middle section before
@@ -580,6 +764,200 @@ mod tests {
         );
         // Small result in tail should be untouched.
         assert_eq!(pruned[2]["content"].as_str().unwrap(), "small");
+    }
+
+    // ── cap_oversized_tool_results (dirge-k6be) ─────────
+
+    /// Under the cap → message passes through unchanged.
+    #[test]
+    fn cap_passes_small_tool_results_through() {
+        let msgs = vec![
+            serde_json::json!({"role": "user", "content": "hello"}),
+            serde_json::json!({"role": "toolResult", "content": "tiny", "toolName": "read"}),
+        ];
+        let capped = cap_oversized_tool_results(&msgs, 1000);
+        assert_eq!(capped, msgs, "no message should change under the cap");
+    }
+
+    /// Over the cap → content gets truncated with a head + tail +
+    /// marker payload that mentions the dropped count. Original
+    /// content NOT preserved verbatim.
+    #[test]
+    fn cap_truncates_oversized_tool_result_with_head_tail_marker() {
+        // 40 KB of 'x' chars ≈ 10000 tokens — well over a 100-token cap.
+        let big = "x".repeat(40_000);
+        let msgs = vec![
+            serde_json::json!({"role": "toolResult", "content": big.clone(), "toolName": "read"}),
+        ];
+        let capped = cap_oversized_tool_results(&msgs, 100);
+        let content = capped[0]["content"].as_str().unwrap();
+        // Must be smaller than the input.
+        assert!(
+            content.len() < big.len(),
+            "capped content must be shorter: got {} vs {}",
+            content.len(),
+            big.len(),
+        );
+        // Truncation marker must mention the dropped count.
+        assert!(
+            content.contains("truncated"),
+            "must mention truncation: {content:?}",
+        );
+        // Both head and tail of the original must be present (x's).
+        assert!(content.starts_with('x'), "head preserved: {content:?}");
+        assert!(content.ends_with('x'), "tail preserved: {content:?}");
+    }
+
+    /// Cap respects both `role: "tool"` and `role: "toolResult"`.
+    #[test]
+    fn cap_handles_both_tool_role_shapes() {
+        let big = "y".repeat(40_000);
+        let msgs = vec![
+            serde_json::json!({"role": "tool", "content": big.clone(), "tool_name": "bash"}),
+            serde_json::json!({"role": "toolResult", "content": big.clone(), "toolName": "bash"}),
+        ];
+        let capped = cap_oversized_tool_results(&msgs, 100);
+        for (i, msg) in capped.iter().enumerate() {
+            let content = msg["content"].as_str().unwrap();
+            assert!(
+                content.len() < big.len(),
+                "message {i} must be capped: len={}",
+                content.len()
+            );
+            assert!(content.contains("truncated"), "message {i} missing marker");
+        }
+    }
+
+    /// Non-tool roles (`user`, `assistant`, `system`) are NEVER
+    /// touched, even when their content is huge. Truncating a
+    /// user prompt would corrupt authored intent
+    /// (Reasonix `shrink.ts:17`).
+    #[test]
+    fn cap_never_touches_non_tool_messages() {
+        let big = "z".repeat(40_000);
+        let msgs = vec![
+            serde_json::json!({"role": "user", "content": big.clone()}),
+            serde_json::json!({"role": "assistant", "content": big.clone()}),
+            serde_json::json!({"role": "system", "content": big.clone()}),
+        ];
+        let capped = cap_oversized_tool_results(&msgs, 100);
+        assert_eq!(capped, msgs, "non-tool messages must pass through verbatim");
+    }
+
+    /// Idempotent: capping an already-capped result is a no-op
+    /// (the marker payload itself is under any reasonable cap).
+    #[test]
+    fn cap_is_idempotent_on_already_capped_results() {
+        let big = "a".repeat(40_000);
+        let msgs =
+            vec![serde_json::json!({"role": "toolResult", "content": big, "toolName": "read"})];
+        let first = cap_oversized_tool_results(&msgs, 100);
+        let second = cap_oversized_tool_results(&first, 100);
+        assert_eq!(
+            first, second,
+            "second pass must produce no change: first={first:?} second={second:?}",
+        );
+    }
+
+    /// Cap applies to ALL tool results regardless of position.
+    /// Reasonix `shrink.ts:23-31` has no tail-protection.
+    /// (Unlike `prune_tool_outputs` which protects the tail —
+    /// that's a different pass for a different purpose.)
+    #[test]
+    fn cap_applies_to_every_position_including_last() {
+        let big = "b".repeat(40_000);
+        let msgs = vec![
+            serde_json::json!({"role": "toolResult", "content": big.clone(), "toolName": "read"}),
+            serde_json::json!({"role": "user", "content": "next"}),
+            serde_json::json!({"role": "toolResult", "content": big.clone(), "toolName": "read"}),
+        ];
+        let capped = cap_oversized_tool_results(&msgs, 100);
+        for i in [0, 2] {
+            let content = capped[i]["content"].as_str().unwrap();
+            assert!(
+                content.len() < big.len(),
+                "tool result at index {i} must be capped",
+            );
+        }
+    }
+
+    /// Content that's borderline — slightly over the cap —
+    /// still truncates (no off-by-one slack).
+    #[test]
+    fn cap_truncates_borderline_oversized_content() {
+        // Cap = 50 tokens ≈ 200 chars. 250 chars is over.
+        let content = "c".repeat(250);
+        let msgs =
+            vec![serde_json::json!({"role": "toolResult", "content": content, "toolName": "read"})];
+        let capped = cap_oversized_tool_results(&msgs, 50);
+        let s = capped[0]["content"].as_str().unwrap();
+        assert!(
+            s.contains("truncated"),
+            "borderline content must trigger cap: {s}"
+        );
+    }
+
+    /// Production shape: `content` is an array of text blocks.
+    /// Oversized text gets capped inside the block. This is
+    /// the shape `tool_result_to_value` (run.rs) actually
+    /// produces in the live loop.
+    #[test]
+    fn cap_truncates_oversized_text_inside_block_array() {
+        let big = "d".repeat(40_000);
+        let msgs = vec![serde_json::json!({
+            "role": "toolResult",
+            "content": [{"type": "text", "text": big}],
+            "toolName": "read",
+        })];
+        let capped = cap_oversized_tool_results(&msgs, 100);
+        let text = capped[0]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.len() < 40_000,
+            "block text must be capped: {}",
+            text.len()
+        );
+        assert!(
+            text.contains("truncated"),
+            "marker must be present: {text:?}"
+        );
+        // Block type preserved.
+        assert_eq!(capped[0]["content"][0]["type"].as_str(), Some("text"));
+    }
+
+    /// Multi-block: cap distributes the budget across text
+    /// blocks. Non-text blocks pass through.
+    #[test]
+    fn cap_handles_multi_block_content_with_mixed_types() {
+        let big = "e".repeat(20_000);
+        let msgs = vec![serde_json::json!({
+            "role": "toolResult",
+            "content": [
+                {"type": "text", "text": big.clone()},
+                {"type": "image", "source": "ignored"},
+                {"type": "text", "text": big.clone()},
+            ],
+            "toolName": "bash",
+        })];
+        let capped = cap_oversized_tool_results(&msgs, 500);
+        let blocks = capped[0]["content"].as_array().unwrap();
+        // Image block passes through.
+        assert_eq!(blocks[1]["type"].as_str(), Some("image"));
+        assert_eq!(blocks[1]["source"].as_str(), Some("ignored"));
+        // Both text blocks capped.
+        assert!(blocks[0]["text"].as_str().unwrap().len() < 20_000);
+        assert!(blocks[2]["text"].as_str().unwrap().len() < 20_000);
+    }
+
+    /// Array shape under the cap is a no-op.
+    #[test]
+    fn cap_passes_small_block_arrays_through() {
+        let msgs = vec![serde_json::json!({
+            "role": "toolResult",
+            "content": [{"type": "text", "text": "small"}],
+            "toolName": "read",
+        })];
+        let capped = cap_oversized_tool_results(&msgs, 100);
+        assert_eq!(capped, msgs);
     }
 
     #[test]
