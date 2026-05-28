@@ -392,6 +392,17 @@ pub struct LoopSpawnConfig {
     /// dirge-nqr: hard cap on assistant turns within a single run.
     /// `None` = unlimited. Forwarded to `LoopConfig.max_turns`.
     pub max_turns: Option<usize>,
+
+    /// dirge-9tfq: per-session background-task store. When `Some`,
+    /// `spawn_loop_runner` installs a `get_followup_messages` hook
+    /// that drains the store's pending notifications at every
+    /// outer-loop boundary and synthesises a `<system-reminder>`
+    /// user message so the parent agent sees the subagent's result
+    /// without needing the user to re-prompt. `None` keeps the
+    /// legacy behaviour where completion only surfaces when the
+    /// user types (via `prepend_pending_notifications` on the next
+    /// prompt).
+    pub bg_store: Option<crate::agent::tools::background::BackgroundStore>,
 }
 
 impl LoopSpawnConfig {
@@ -421,6 +432,7 @@ impl LoopSpawnConfig {
             escalation_max_per_session: None,
             file_touch_tracker: None,
             max_turns: None,
+            bg_store: None,
         }
     }
 }
@@ -454,7 +466,14 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
         get_steering_messages: cfg
             .steering_queue
             .map(|q| steering_from_queue(q, QueueMode::All)),
-        get_followup_messages: None,
+        // dirge-9tfq: when a background-task store is provided, install
+        // a follow-up hook that surfaces subagent completions at the
+        // outer-loop boundary. Without this, the parent agent only sees
+        // results when the user re-prompts.
+        get_followup_messages: cfg
+            .bg_store
+            .clone()
+            .map(|store| crate::agent::tools::background::followup_from_background_store(store)),
         reasoning: None,
         thinking_budgets: None,
         headers: std::collections::HashMap::new(),
@@ -513,8 +532,26 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
                     super::plugin_hooks::get_steering_messages_from_plugin_manager(pm.clone()),
                 );
             }
-            loop_config.get_followup_messages =
-                Some(super::plugin_hooks::get_followup_messages_from_plugin_manager(pm));
+            // dirge-9tfq: when both plugin AND background-store
+            // followups are configured, run both at each boundary and
+            // concatenate (background notifications first so the
+            // subagent result is observed before any plugin-injected
+            // continuation). Without composing, installing the plugin
+            // hook would silently shadow subagent completion delivery.
+            let plugin_followup =
+                super::plugin_hooks::get_followup_messages_from_plugin_manager(pm);
+            loop_config.get_followup_messages = match loop_config.get_followup_messages.take() {
+                Some(bg_followup) => Some(std::sync::Arc::new(move || {
+                    let bg = bg_followup.clone();
+                    let pl = plugin_followup.clone();
+                    Box::pin(async move {
+                        let mut out = bg().await;
+                        out.extend(pl().await);
+                        out
+                    })
+                })),
+                None => Some(plugin_followup),
+            };
         }
     }
 
@@ -953,6 +990,134 @@ mod tests {
             found_block_text,
             "expected ToolResult to convey 'policy' block reason; got {events:?}"
         );
+    }
+
+    /// dirge-9tfq integration: while a background subagent is
+    /// running, the parent agent finishes its initial turn and the
+    /// inner loop drains (no more tool calls, no pending steering).
+    /// Without this fix the run would terminate and the user would
+    /// have to re-prompt to see the subagent's result.
+    ///
+    /// With `cfg.bg_store = Some(store)`, the outer-loop boundary
+    /// poll picks up the completion notification, re-enters the
+    /// inner loop with the result as `pending_messages`, and the
+    /// model sees `[task <id>] completed: <result>` in its next
+    /// turn. The final transcript contains both the synthetic
+    /// follow-up user message AND a subsequent assistant turn that
+    /// observed it.
+    ///
+    /// Stream factory is a state machine across three LLM calls:
+    ///   call 0: emit a text-only response (initial work done)
+    ///           — between this call and the next outer-poll, push
+    ///           a completion into the store from outside.
+    ///   call 1: the call AFTER the followup is injected; we
+    ///           inspect llm_ctx.messages to assert the synthetic
+    ///           reminder is present, then emit a final text.
+    ///
+    /// The parent loop transitions: turn 0 (text) → inner exits →
+    /// outer polls followup → store has 1 notification → inject as
+    /// pending → re-enter inner → turn 1 (sees notification) →
+    /// exit.
+    #[tokio::test]
+    async fn parent_idle_during_subagent_run_resumes_on_completion() {
+        use crate::agent::tools::background::{BackgroundStore, TaskState};
+
+        let store = BackgroundStore::new();
+        store.insert("sub-1".into());
+
+        let saw_reminder = Arc::new(Mutex::new(false));
+        let saw_clone = saw_reminder.clone();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let store_for_factory = store.clone();
+
+        let factory: StreamFn = Arc::new(move |llm_ctx, _opts| {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            match n {
+                0 => {
+                    // First call: parent finishes its initial work
+                    // and pretends to be idle. After we return,
+                    // the inner loop exits (text response = no
+                    // tool calls). Between this return and the
+                    // outer-loop followup poll, the subagent
+                    // "completes" — simulate that by notifying
+                    // the store right now.
+                    store_for_factory.notify(
+                        "sub-1",
+                        TaskState::Completed("subagent finished work".into()),
+                    );
+                }
+                1 => {
+                    // Second call: the followup must have been
+                    // injected as a user message before this call.
+                    // Inspect llm_ctx.messages for the marker.
+                    let found = llm_ctx.messages.iter().any(|m| {
+                        m.get("role").and_then(|r| r.as_str()) == Some("user")
+                            && m.get("content").and_then(|c| c.as_str()).map(|s| {
+                                s.contains("[task sub-1] completed:")
+                                    && s.contains("subagent finished work")
+                            }) == Some(true)
+                    });
+                    *saw_clone.lock().unwrap() = found;
+                }
+                _ => {}
+            }
+            let msg = if n == 0 {
+                text_response("initial work done; awaiting subagent")
+            } else {
+                text_response("acknowledged subagent result")
+            };
+            let reason = msg.stop_reason;
+            Box::pin(futures::stream::iter(vec![StreamEvent::Done {
+                reason,
+                message: msg,
+                usage: None,
+            }]))
+        });
+
+        let mut cfg = LoopSpawnConfig::minimal(factory, "start work, then wait");
+        cfg.bg_store = Some(store.clone());
+
+        let runner = spawn_loop_runner(cfg);
+        let _events = drain(runner.event_rx).await;
+        let _ = runner.task.await;
+
+        assert!(
+            *saw_reminder.lock().unwrap(),
+            "second LLM call must see the [task sub-1] completed marker; \
+             the parent loop should have re-entered the inner loop with \
+             the subagent completion as a pending user message",
+        );
+        // Pending queue must be drained after the followup fires —
+        // otherwise the same notification would re-inject on every
+        // outer-boundary poll and spam the model.
+        assert!(
+            store.drain_notifications().is_empty(),
+            "completion must be consumed exactly once",
+        );
+    }
+
+    /// dirge-9tfq: without a bg_store, the follow-up hook stays
+    /// unset and the loop behaves byte-identically to pre-9tfq —
+    /// no synthetic user message is injected and the run ends
+    /// after the assistant's text-only response. Guards against a
+    /// regression where the hook fires on every poll regardless of
+    /// configuration.
+    #[tokio::test]
+    async fn no_bg_store_means_no_followup_injection() {
+        let mut cfg = LoopSpawnConfig::minimal(canned_factory(vec![text_response("done")]), "hi");
+        cfg.bg_store = None; // explicit for clarity
+
+        let runner = spawn_loop_runner(cfg);
+        let events = drain(runner.event_rx).await;
+        let _ = runner.task.await;
+
+        // Exactly one TurnEnd — outer loop did NOT re-enter with a
+        // phantom follow-up.
+        let turn_ends = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnEnd { .. }))
+            .count();
+        assert_eq!(turn_ends, 1, "expected single turn; got {turn_ends}");
     }
 
     fn agent_event_kind(e: &AgentEvent) -> &'static str {

@@ -217,6 +217,7 @@ async fn h7_scenario_1_simple_text() {
         escalation_max_per_session: None,
         file_touch_tracker: None,
         max_turns: None,
+        bg_store: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -292,6 +293,7 @@ async fn h7_scenario_2_turn_boundaries() {
         escalation_max_per_session: None,
         file_touch_tracker: None,
         max_turns: None,
+        bg_store: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -401,6 +403,7 @@ async fn h7_scenario_5_auth_error_surfaces() {
         escalation_max_per_session: None,
         file_touch_tracker: None,
         max_turns: None,
+        bg_store: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, _) = drain_to_done(runner).await;
@@ -562,6 +565,7 @@ async fn h7_scenario_3_tool_dispatch() {
         escalation_max_per_session: None,
         file_touch_tracker: None,
         max_turns: None,
+        bg_store: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -675,6 +679,7 @@ async fn h7_glm_scenario_1_simple_text() {
         escalation_max_per_session: None,
         file_touch_tracker: None,
         max_turns: None,
+        bg_store: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;
@@ -806,6 +811,7 @@ async fn h7_glm_scenario_3_tool_dispatch() {
         escalation_max_per_session: None,
         file_touch_tracker: None,
         max_turns: None,
+        bg_store: None,
     };
     let runner = spawn_loop_runner(cfg).into_agent_runner();
     let (events, response) = drain_to_done(runner).await;

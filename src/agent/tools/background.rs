@@ -279,6 +279,57 @@ impl BackgroundStore {
     }
 }
 
+/// dirge-9tfq: build a `GetFollowupMessagesFn` bound to this store.
+///
+/// At the outer-loop boundary (inner loop has no more tool calls AND no
+/// pending steering), the agent_loop polls this hook. If background
+/// subagents have completed since the last poll, the hook drains the
+/// pending notifications and returns a synthetic `LoopMessage::User`
+/// containing a `<system-reminder>` block — one per completed task,
+/// formatted exactly like `prepend_pending_notifications`.
+///
+/// The returned message tells the model to consider the result and
+/// decide whether to act on it. Because this fires at the outer-loop
+/// boundary, the loop will re-enter the inner loop with the
+/// notification as `pending_messages` and the model sees the
+/// completion on its next turn — even if the user never types again.
+///
+/// Empty store / no pending → empty `Vec`, outer loop exits naturally.
+pub fn followup_from_background_store(
+    store: BackgroundStore,
+) -> crate::agent::agent_loop::hooks::GetFollowupMessagesFn {
+    use crate::agent::agent_loop::message::{LoopMessage, UserMessage};
+    Arc::new(move || {
+        let store = store.clone();
+        Box::pin(async move {
+            let drained = store.drain_notifications();
+            if drained.is_empty() {
+                return Vec::new();
+            }
+            let mut body = String::with_capacity(256);
+            body.push_str("<system-reminder>\n");
+            body.push_str("The following background tasks finished since your last turn:\n\n");
+            for (i, n) in drained.iter().enumerate() {
+                if i > 0 {
+                    body.push('\n');
+                }
+                match &n.state {
+                    TaskState::Completed(text) => {
+                        body.push_str(&format!("[task {}] completed: {}\n", n.id, text));
+                    }
+                    TaskState::Failed(err) => {
+                        body.push_str(&format!("[task {}] failed: {}\n", n.id, err));
+                    }
+                    // notify() never queues Running, defensive no-op.
+                    TaskState::Running => {}
+                }
+            }
+            body.push_str("</system-reminder>");
+            vec![LoopMessage::User(UserMessage { content: body })]
+        })
+    })
+}
+
 /// Format pending notifications as a `<system-reminder>` block prepended to
 /// the next user prompt. Returns the prompt unchanged when there's nothing
 /// pending or no store is provided.
@@ -813,6 +864,130 @@ mod tests {
         // Drain queue still works for the LLM side.
         let drained = store.drain_notifications();
         assert_eq!(drained.len(), 1);
+    }
+
+    // ---- followup_from_background_store (dirge-9tfq) ----
+
+    use crate::agent::agent_loop::message::LoopMessage;
+
+    /// `subagent_completion_injects_followup_message`: when a background
+    /// subagent completes, the followup hook returns a synthetic user
+    /// message wrapping the result in a `<system-reminder>` block.
+    /// This is what the parent loop's outer-boundary poll will see and
+    /// inject into the next inner-loop iteration.
+    #[tokio::test]
+    async fn subagent_completion_injects_followup_message() {
+        let store = BackgroundStore::new();
+        store.insert("abc123".into());
+        store.notify("abc123", TaskState::Completed("the answer is 42".into()));
+
+        let hook = followup_from_background_store(store.clone());
+        let messages = hook().await;
+
+        assert_eq!(messages.len(), 1, "exactly one synthesized user message");
+        let LoopMessage::User(u) = &messages[0] else {
+            panic!("expected User message, got {:?}", messages[0]);
+        };
+        // System-reminder wrapper present.
+        assert!(u.content.starts_with("<system-reminder>\n"));
+        assert!(u.content.ends_with("</system-reminder>"));
+        // Task id + completion marker + result text all present.
+        assert!(u.content.contains("[task abc123] completed:"));
+        assert!(u.content.contains("the answer is 42"));
+
+        // Queue drained — second poll returns empty so the outer loop
+        // can exit naturally on a clean board.
+        assert!(hook().await.is_empty());
+    }
+
+    /// `subagent_failure_injects_followup_with_error_marker`: failed
+    /// subagents surface via the same hook but tagged `failed:` rather
+    /// than `completed:`. The model needs to distinguish so it can
+    /// recover (retry, fall back, or report the failure to the user).
+    #[tokio::test]
+    async fn subagent_failure_injects_followup_with_error_marker() {
+        let store = BackgroundStore::new();
+        store.insert("xyz789".into());
+        store.notify(
+            "xyz789",
+            TaskState::Failed("connection reset by peer".into()),
+        );
+
+        let hook = followup_from_background_store(store);
+        let messages = hook().await;
+
+        assert_eq!(messages.len(), 1);
+        let LoopMessage::User(u) = &messages[0] else {
+            panic!("expected User message");
+        };
+        assert!(u.content.contains("[task xyz789] failed:"));
+        assert!(u.content.contains("connection reset by peer"));
+        // Must NOT use the "completed" marker for failures.
+        assert!(
+            !u.content.contains("completed:"),
+            "failures must not be tagged 'completed': {}",
+            u.content,
+        );
+    }
+
+    /// Multiple completions since the last poll are batched into a
+    /// single `<system-reminder>` so the model gets all results in
+    /// one turn rather than waking once per task.
+    #[tokio::test]
+    async fn followup_batches_multiple_completions_in_one_reminder() {
+        let store = BackgroundStore::new();
+        for i in 0..3 {
+            store.insert(format!("t{i}"));
+            store.notify(
+                &format!("t{i}"),
+                TaskState::Completed(format!("result-{i}")),
+            );
+        }
+        let hook = followup_from_background_store(store);
+        let messages = hook().await;
+
+        assert_eq!(messages.len(), 1, "one reminder, not one per task");
+        let LoopMessage::User(u) = &messages[0] else {
+            panic!("expected User");
+        };
+        // All three tasks present.
+        assert!(u.content.contains("[task t0] completed: result-0"));
+        assert!(u.content.contains("[task t1] completed: result-1"));
+        assert!(u.content.contains("[task t2] completed: result-2"));
+        // FIFO ordering preserved.
+        let i0 = u.content.find("t0").unwrap();
+        let i1 = u.content.find("t1").unwrap();
+        let i2 = u.content.find("t2").unwrap();
+        assert!(i0 < i1 && i1 < i2);
+    }
+
+    /// Empty store → empty Vec. Outer loop sees no follow-up and exits.
+    /// Critical: if this returned `vec![empty_message]`, the outer loop
+    /// would spin re-entering the inner loop with a blank user turn.
+    #[tokio::test]
+    async fn followup_returns_empty_when_no_completions() {
+        let store = BackgroundStore::new();
+        store.insert("running".into()); // inserted but not notified
+        let hook = followup_from_background_store(store);
+        assert!(hook().await.is_empty());
+    }
+
+    /// Polling twice in a row only delivers each notification once.
+    /// This is the same drain-semantics as `prepend_pending_notifications`
+    /// — without it, the model would see the same completion on every
+    /// outer-loop boundary and spam tool calls reacting to a result it
+    /// already handled.
+    #[tokio::test]
+    async fn followup_drains_queue_once() {
+        let store = BackgroundStore::new();
+        store.insert("t1".into());
+        store.notify("t1", TaskState::Completed("once".into()));
+
+        let hook = followup_from_background_store(store);
+        let first = hook().await;
+        assert_eq!(first.len(), 1);
+        let second = hook().await;
+        assert!(second.is_empty(), "second poll must not redeliver");
     }
 
     // Concurrency smoke: many threads inserting + notifying must not lose

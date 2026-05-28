@@ -801,6 +801,13 @@ pub struct AnyAgent {
     /// dirge-z73i: model identifier for the review route, surfaced
     /// in the review runner's `LoopConfig.model_name`.
     review_model_name: Option<String>,
+    /// dirge-9tfq: per-session background-task store, forwarded into
+    /// `LoopSpawnConfig.bg_store` at spawn time so the loop's
+    /// `get_followup_messages` hook surfaces subagent completions
+    /// without needing the user to re-prompt. `None` when no store
+    /// was supplied (tests, `--no-tools`); the followup path stays
+    /// disabled in that case (legacy behaviour byte-identical).
+    bg_store: Option<crate::agent::tools::background::BackgroundStore>,
 }
 
 #[derive(Clone)]
@@ -840,7 +847,23 @@ impl AnyAgent {
             review_stream_fn: None,
             review_provider_name: None,
             review_model_name: None,
+            bg_store: None,
         }
+    }
+
+    /// dirge-9tfq: install the per-session background-task store so
+    /// `spawn_runner` can wire the subagent-completion follow-up
+    /// hook into the agent loop. Called by `build_agent` whenever a
+    /// `BackgroundStore` was provided (production interactive paths;
+    /// not test / `--no-tools`). Idempotent — repeated calls replace
+    /// the stored handle but keep the Arc-internal state in the
+    /// shared store unchanged.
+    pub fn with_bg_store(
+        mut self,
+        store: crate::agent::tools::background::BackgroundStore,
+    ) -> Self {
+        self.bg_store = Some(store);
+        self
     }
 
     /// dirge-z73i: install a dedicated stream_fn for the
@@ -1201,6 +1224,12 @@ impl AnyAgent {
         // dirge-nqr: forward the per-run turn cap. `None` keeps the
         // legacy unlimited behavior.
         cfg.max_turns = self.max_turns;
+        // dirge-9tfq: forward the BackgroundStore so the spawn pipeline
+        // installs a `get_followup_messages` hook that drains pending
+        // subagent completions at the outer-loop boundary. `None`
+        // (no-tools / test paths) leaves the hook unset and the loop
+        // behaves byte-identically to pre-9tfq.
+        cfg.bg_store = self.bg_store.clone();
         #[cfg(feature = "plugin")]
         {
             cfg.plugin_mgr = crate::plugin::hook::global();
@@ -1658,6 +1687,16 @@ pub async fn build_agent(
     // Phase 4 part 2 — context-depth reminder wiring.
     if let Some(threshold) = cfg.resolve_context_depth_threshold() {
         agent = agent.with_context_depth_reminder(threshold);
+    }
+
+    // dirge-9tfq — install the BackgroundStore on the agent so
+    // `spawn_runner` can thread it into `LoopSpawnConfig.bg_store`,
+    // wiring the subagent-completion follow-up path. Done after
+    // the variant-dispatch `build_inner!` macro so every variant
+    // gets the store. When `bg_store` is `None` (test paths,
+    // `--no-tools`) the agent skips the wiring entirely.
+    if let Some(store) = bg_store.as_ref() {
+        agent = agent.with_bg_store(store.clone());
     }
 
     // dirge-z73i — background-review route wiring.
