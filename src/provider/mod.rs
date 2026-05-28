@@ -1282,6 +1282,10 @@ impl AnyAgent {
         // (no-tools / test paths) leaves the hook unset and the loop
         // behaves byte-identically to pre-9tfq.
         cfg.bg_store = self.bg_store.clone();
+        // dirge-h5tv: thread the memory provider into the loop so
+        // auto-compaction can fire on_pre_compress. `None` paths
+        // (no provider attached) keep legacy no-op behavior.
+        cfg.memory_provider = self.memory_provider.clone();
         #[cfg(feature = "plugin")]
         {
             cfg.plugin_mgr = crate::plugin::hook::global();

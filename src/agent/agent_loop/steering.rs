@@ -401,6 +401,7 @@ mod tests {
             &tx,
             &factory,
             None,
+            None, // memory_provider — test default
         )
         .await;
 

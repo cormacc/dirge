@@ -403,6 +403,14 @@ pub struct LoopSpawnConfig {
     /// user types (via `prepend_pending_notifications` on the next
     /// prompt).
     pub bg_store: Option<crate::agent::tools::background::BackgroundStore>,
+
+    /// dirge-h5tv: memory provider passed through to the auto-compaction
+    /// path so `on_pre_compress` can fire when the loop folds messages.
+    /// Pre-fix the hook only fired from `handle_compress` (the /compress
+    /// slash command), so the silent auto-fold path dropped plugin-provider
+    /// insights every time. `None` is a no-op (no provider attached, or a
+    /// non-interactive test path).
+    pub memory_provider: Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
 }
 
 impl LoopSpawnConfig {
@@ -433,6 +441,7 @@ impl LoopSpawnConfig {
             file_touch_tracker: None,
             max_turns: None,
             bg_store: None,
+            memory_provider: None,
         }
     }
 }
@@ -565,6 +574,9 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
     })];
     let stream_fn = cfg.stream_fn;
     let summarize_fn = cfg.summarize_fn.clone();
+    // dirge-h5tv: capture the provider before the move-closure so
+    // auto-compaction can fire on_pre_compress mid-loop.
+    let memory_provider = cfg.memory_provider.clone();
 
     let task = tokio::spawn(async move {
         // Inner channel for LoopEvents emitted by run_agent_loop.
@@ -611,6 +623,7 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
                 &loop_tx,
                 &stream_fn,
                 summarize_fn,
+                memory_provider,
             )
             .await;
             // Drop the sender so the pump observes channel

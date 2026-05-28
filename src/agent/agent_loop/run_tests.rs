@@ -148,7 +148,7 @@ async fn run_compaction_pass_inserts_summary_and_rotates_session() {
         }));
 
     let (tx, mut rx) = mpsc::channel::<LoopEvent>(8);
-    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &tx).await;
+    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, &tx).await;
     drop(tx);
 
     // (a) older messages dropped.
@@ -222,7 +222,7 @@ async fn run_compaction_pass_without_summarizer_prunes_only() {
     // Use protect_tail = 2 so the large tool result is eligible
     // for pruning (it's at index 1, end = 4 - 2 = 2, so index
     // 1 is in-range).
-    super::run_compaction_pass(&mut ctx, &None, 2, &tx).await;
+    super::run_compaction_pass(&mut ctx, &None, 2, &None, &tx).await;
     drop(tx);
 
     // No SUMMARY_PREFIX message inserted.
@@ -355,6 +355,7 @@ async fn test_emits_full_agent_loop_event_sequence() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -401,6 +402,7 @@ async fn test_full_loop_with_tool_then_final_text() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -483,6 +485,7 @@ async fn test_prepare_next_turn_snapshot_applied() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
 
@@ -528,6 +531,7 @@ async fn test_should_stop_after_turn_stops_loop() {
         &tx,
         &factory_counted,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -571,6 +575,7 @@ async fn test_terminate_stops_loop_after_tool_batch() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
 
@@ -623,6 +628,7 @@ async fn test_after_tool_call_terminate_stops_loop() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
 
@@ -664,6 +670,7 @@ async fn test_continue_when_not_all_terminate() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
 
@@ -747,6 +754,7 @@ async fn test_steering_messages_injected_after_tool_calls() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -886,6 +894,7 @@ async fn loop_preserves_history_across_turns() {
         &tx,
         &factory,
         None,
+        None, // memory_provider — test default
     )
     .await;
 
@@ -990,6 +999,7 @@ async fn full_signal_chain_exits_cleanly() {
             &tx,
             &factory,
             None,
+            None, // memory_provider — test default
         )
         .await
     });
@@ -1008,5 +1018,138 @@ async fn full_signal_chain_exits_cleanly() {
     assert!(
         result.is_ok(),
         "loop should exit within 2s after signal cancel"
+    );
+}
+
+// ── dirge-h5tv: build_augmented_focus + transcript helper ──
+
+use crate::extras::memory_provider::MemoryProvider;
+use std::sync::Arc;
+
+#[derive(Default)]
+struct PreCompressRecorder {
+    seen: Mutex<Vec<String>>,
+    return_value: Mutex<String>,
+}
+impl MemoryProvider for PreCompressRecorder {
+    fn name(&self) -> &str {
+        "pre-compress-recorder"
+    }
+    fn view(&self, _: &str) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    fn add(&self, _: &str, _: &str) -> Result<serde_json::Value, String> {
+        Ok(serde_json::Value::Null)
+    }
+    fn replace(&self, _: &str, _: &str, _: &str) -> Result<serde_json::Value, String> {
+        Ok(serde_json::Value::Null)
+    }
+    fn remove(&self, _: &str, _: &str) -> Result<serde_json::Value, String> {
+        Ok(serde_json::Value::Null)
+    }
+    fn on_pre_compress(&self, transcript: &str) -> String {
+        self.seen.lock().unwrap().push(transcript.to_string());
+        self.return_value.lock().unwrap().clone()
+    }
+}
+
+fn make_middle() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({"role": "user", "content": "what is rust?"}),
+        serde_json::json!({"role": "assistant", "content": "a systems language"}),
+    ]
+}
+
+#[test]
+fn build_augmented_focus_returns_none_with_no_inputs() {
+    let result = super::build_augmented_focus(None, None, &make_middle());
+    assert!(
+        result.is_none(),
+        "no focus + no provider must yield None instructions"
+    );
+}
+
+#[test]
+fn build_augmented_focus_preserves_focus_when_no_provider() {
+    let result = super::build_augmented_focus(Some("error handling"), None, &make_middle());
+    assert_eq!(result.as_deref(), Some("error handling"));
+}
+
+#[test]
+fn build_augmented_focus_folds_provider_insights_into_focus() {
+    let provider = Arc::new(PreCompressRecorder::default());
+    *provider.return_value.lock().unwrap() = "user prefers async/await over threads".into();
+    let provider_dyn: Arc<dyn MemoryProvider> = provider.clone();
+
+    let result =
+        super::build_augmented_focus(Some("retry logic"), Some(&provider_dyn), &make_middle());
+
+    let out = result.expect("focus + insights produces Some");
+    assert!(out.contains("retry logic"), "user focus must survive");
+    assert!(
+        out.contains("user prefers async/await over threads"),
+        "provider insight must be folded in: {out}"
+    );
+    assert!(
+        out.contains("Provider insights:"),
+        "insights must be labelled so the summarizer can attribute them"
+    );
+
+    // Provider received the transcript built from the middle slice.
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "hook fires exactly once");
+    assert!(
+        seen[0].contains("user: what is rust?")
+            && seen[0].contains("assistant: a systems language"),
+        "transcript must contain both messages: {:?}",
+        seen[0]
+    );
+}
+
+#[test]
+fn build_augmented_focus_yields_insights_alone_when_no_focus() {
+    let provider = Arc::new(PreCompressRecorder::default());
+    *provider.return_value.lock().unwrap() = "remember the build flags".into();
+    let provider_dyn: Arc<dyn MemoryProvider> = provider.clone();
+
+    let result = super::build_augmented_focus(None, Some(&provider_dyn), &make_middle());
+
+    let out = result.expect("insights alone produce Some");
+    assert!(out.starts_with("Provider insights:"));
+    assert!(out.contains("remember the build flags"));
+}
+
+#[test]
+fn build_augmented_focus_treats_empty_provider_output_as_none() {
+    let provider = Arc::new(PreCompressRecorder::default());
+    // Empty string return from on_pre_compress — provider has
+    // nothing to contribute this turn.
+    *provider.return_value.lock().unwrap() = "".into();
+    let provider_dyn: Arc<dyn MemoryProvider> = provider.clone();
+
+    let result = super::build_augmented_focus(None, Some(&provider_dyn), &make_middle());
+    assert!(
+        result.is_none(),
+        "empty provider output + no focus must yield None"
+    );
+
+    // But the hook still fired (so it can do internal bookkeeping
+    // even if its return is empty).
+    assert_eq!(provider.seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn transcript_from_value_slice_renders_role_prefixes() {
+    let messages = vec![
+        serde_json::json!({"role": "user", "content": "hello"}),
+        serde_json::json!({"role": "assistant", "content": "hi"}),
+        serde_json::json!({"role": "system", "content": ""}), // empty — skipped
+    ];
+    let t = super::transcript_from_value_slice(&messages);
+    assert!(t.contains("user: hello"));
+    assert!(t.contains("assistant: hi"));
+    assert!(
+        !t.contains("system: "),
+        "empty content must be skipped: {t:?}"
     );
 }

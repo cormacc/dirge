@@ -112,13 +112,76 @@ fn storm_for_config(config: &LoopConfig) -> StormBreaker {
 /// once the pass finishes (whether pruning-only or pruning+summary).
 /// Session.id rotation + DB persistence is delegated to the event
 /// consumer side via this event channel.
+/// dirge-h5tv: fire `on_pre_compress` on a memory provider (if
+/// attached) over the to-be-discarded message slice, and combine
+/// its returned insights with the user-supplied focus topic so the
+/// summary prompt preserves both. Returns the final string (or
+/// `None` when neither contributes).
+///
+/// Lives here rather than in compression.rs because the
+/// MemoryProvider trait lives in `extras` and shouldn't leak into
+/// the pure compression module. The slice → transcript conversion
+/// uses `build_transcript_from_value_slice` to share format with
+/// the slash-path's `build_transcript_from_slice`.
+fn build_augmented_focus(
+    focus_topic: Option<&str>,
+    provider: Option<&std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
+    middle: &[serde_json::Value],
+) -> Option<String> {
+    let insights = provider.map(|p| {
+        let transcript = transcript_from_value_slice(middle);
+        p.on_pre_compress(&transcript)
+    });
+    match (
+        focus_topic.map(str::trim),
+        insights.as_deref().map(str::trim),
+    ) {
+        (Some(focus), Some(ins)) if !focus.is_empty() && !ins.is_empty() => {
+            Some(format!("{focus}\n\nProvider insights:\n{ins}"))
+        }
+        (Some(focus), _) if !focus.is_empty() => Some(focus.to_string()),
+        (_, Some(ins)) if !ins.is_empty() => Some(format!("Provider insights:\n{ins}")),
+        _ => None,
+    }
+}
+
+/// Build a transcript string from a Vec<Value> slice (raw loop
+/// messages). Mirrors `build_transcript_from_slice` over
+/// `SessionMessage`. Used by `build_augmented_focus` for the
+/// on_pre_compress hook.
+fn transcript_from_value_slice(messages: &[serde_json::Value]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for m in messages {
+        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+        let content = m
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !content.is_empty() {
+            let _ = writeln!(out, "{}: {}", role, content);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 async fn run_compaction_pass(
     current_context: &mut Context,
     summarize_fn: &Option<crate::agent::compression::SummarizeFn>,
     protect_tail: usize,
+    memory_provider: &Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
     emit: &mpsc::Sender<LoopEvent>,
 ) {
-    run_compaction_pass_with_focus(current_context, summarize_fn, protect_tail, None, emit).await
+    run_compaction_pass_with_focus(
+        current_context,
+        summarize_fn,
+        protect_tail,
+        None,
+        memory_provider,
+        emit,
+    )
+    .await
 }
 
 /// Same as `run_compaction_pass` but accepts an optional focus
@@ -126,11 +189,18 @@ async fn run_compaction_pass(
 /// the `/compress <focus>` slash command path. The auto-triggered
 /// compaction (`PostUsageDecisionKind::Fold` / `ExitWithSummary`)
 /// continues to use the no-focus wrapper above.
+///
+/// dirge-h5tv: `memory_provider` carries the optional plugin
+/// provider so `on_pre_compress` can fire here, mirroring what
+/// `handle_compress` does for the /compress slash command. Auto-
+/// fold is the high-frequency path; without the fire, plugin
+/// providers' extracted insights are silently dropped.
 async fn run_compaction_pass_with_focus(
     current_context: &mut Context,
     summarize_fn: &Option<crate::agent::compression::SummarizeFn>,
     protect_tail: usize,
     focus_topic: Option<String>,
+    memory_provider: &Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
     emit: &mpsc::Sender<LoopEvent>,
 ) {
     use crate::agent::compression;
@@ -167,11 +237,18 @@ async fn run_compaction_pass_with_focus(
                 compression::find_previous_summary(&current_context.messages).map(|(_, body)| body);
             let budget =
                 compression::summary_budget(compression::estimate_messages_tokens(&middle));
+            // dirge-h5tv: fire on_pre_compress on the to-be-discarded
+            // middle slice and fold the provider's insights into the
+            // focus_topic block. Empty returns / no provider → no
+            // change (focus_topic stays as supplied). This mirrors
+            // the /compress slash path's instructions augmentation.
+            let augmented_focus =
+                build_augmented_focus(focus_topic.as_deref(), memory_provider.as_ref(), &middle);
             let prompt = compression::build_summary_prompt(
                 &middle,
                 budget,
                 prev.as_deref(),
-                focus_topic.as_deref(),
+                augmented_focus.as_deref(),
             );
             match sfn(prompt).await {
                 Ok(summary) if compression::validate_summary(&summary) => {
@@ -239,6 +316,9 @@ pub async fn run_agent_loop(
     emit: &mpsc::Sender<LoopEvent>,
     stream_fn: &StreamFn,
     summarize_fn: Option<crate::agent::compression::SummarizeFn>,
+    // dirge-h5tv: optional memory provider for the on_pre_compress
+    // hook during auto-compaction.
+    memory_provider: Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
 ) -> Vec<LoopMessage> {
     // Pi line 103: `newMessages = [...prompts]`.
     let new_messages = prompts.clone();
@@ -278,6 +358,7 @@ pub async fn run_agent_loop(
         emit,
         stream_fn,
         summarize_fn,
+        memory_provider,
     )
     .await
 }
@@ -305,6 +386,10 @@ pub async fn run_loop(
     emit: &mpsc::Sender<LoopEvent>,
     stream_fn: &StreamFn,
     summarize_fn: Option<crate::agent::compression::SummarizeFn>,
+    // dirge-h5tv: optional memory provider so on_pre_compress fires
+    // when the loop auto-folds. `None` is a no-op (test paths,
+    // no plugin provider attached).
+    memory_provider: Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
 ) -> Vec<LoopMessage> {
     let mut first_turn = true;
 
@@ -666,6 +751,7 @@ pub async fn run_loop(
                                 &mut current_context,
                                 &summarize_fn,
                                 5, // protect last 5 messages
+                                &memory_provider,
                                 emit,
                             )
                             .await;
@@ -684,6 +770,7 @@ pub async fn run_loop(
                             &mut current_context,
                             &summarize_fn,
                             3, // protect only last 3
+                            &memory_provider,
                             emit,
                         )
                         .await;

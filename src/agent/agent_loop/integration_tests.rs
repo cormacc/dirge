@@ -289,6 +289,7 @@ async fn kwz_single_turn_happy_path_event_sequence() {
         &tx,
         &stream,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -369,6 +370,7 @@ async fn kwz_tool_call_turn_dispatches_and_continues() {
         &tx,
         &stream,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -440,6 +442,7 @@ async fn kwz_parallel_tool_calls_both_dispatched() {
         &tx,
         &stream,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -582,6 +585,7 @@ async fn kwz_storm_breaker_trips_on_repeat() {
         &tx,
         &stream,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -703,6 +707,7 @@ async fn kwz_abort_signal_mid_turn_exits_cleanly() {
             &tx,
             &stream,
             None,
+            None, // memory_provider — test default
         )
         .await
     });
@@ -830,6 +835,7 @@ async fn kwz_repair_exhaustion_arms_escalation_stream() {
         &tx,
         &default_stream,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -905,6 +911,7 @@ async fn nqr_max_turns_cap_terminates_run() {
         &tx,
         &stream,
         None,
+        None, // memory_provider — test default
     )
     .await;
     drop(tx);
@@ -962,6 +969,7 @@ async fn nqr_unlimited_when_max_turns_none() {
         &tx,
         &stream,
         None,
+        None, // memory_provider — test default
     )
     .await;
 
