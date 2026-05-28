@@ -120,6 +120,14 @@ pub struct ToolsConfig {
     /// 10 MiB streaming body cap inside `webfetch` itself is
     /// independent and stays as the in-memory ceiling.
     pub webfetch_output_inline_max_bytes: Option<usize>,
+    /// dirge-nmv5: inline output budget for the `task` subagent
+    /// tool. Subagent answers larger than this are relayed to
+    /// `~/.dirge/transient/<pid>/task-<unix_ts>.txt` and the parent
+    /// agent receives a head/tail summary + a `read`-tool hint to
+    /// fetch the full payload. Default 8 KiB. Replaces the legacy
+    /// 3000-char hard truncation that silently dropped the tail of
+    /// large subagent answers.
+    pub task_output_inline_max_bytes: Option<usize>,
 }
 
 /// Per-server LSP configuration. All fields optional — unspecified fields

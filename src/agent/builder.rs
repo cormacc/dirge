@@ -268,6 +268,9 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         cfg.tools
             .as_ref()
             .and_then(|t| t.webfetch_output_inline_max_bytes),
+        cfg.tools
+            .as_ref()
+            .and_then(|t| t.task_output_inline_max_bytes),
     );
 
     if cli.resolve_no_tools(cfg) {

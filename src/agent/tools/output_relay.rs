@@ -62,17 +62,28 @@ const CLEANUP_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 /// them on every call. `0` means "use the default".
 static BASH_INLINE_MAX: AtomicUsize = AtomicUsize::new(0);
 static WEBFETCH_INLINE_MAX: AtomicUsize = AtomicUsize::new(0);
+/// dirge-nmv5: inline budget for the `task` subagent tool. When a
+/// subagent returns more than this many bytes, the full text is
+/// relayed to `~/.dirge/transient/<pid>/task-<ts>.txt` and a
+/// head/tail summary (plus a `read`-tool hint) goes back to the
+/// parent agent. Prevents either silently dropping the bulk of a
+/// subagent's answer OR bloating the parent context with the full
+/// payload.
+static TASK_INLINE_MAX: AtomicUsize = AtomicUsize::new(0);
 
 /// Install the configured inline byte budgets. Called from the
 /// agent builder once the [`Config`](crate::config::Config) is
 /// loaded. `None` keeps the compiled-in default
 /// ([`DEFAULT_INLINE_MAX_BYTES`]).
-pub fn set_thresholds(bash: Option<usize>, webfetch: Option<usize>) {
+pub fn set_thresholds(bash: Option<usize>, webfetch: Option<usize>, task: Option<usize>) {
     if let Some(n) = bash {
         BASH_INLINE_MAX.store(n.max(1), Ordering::Relaxed);
     }
     if let Some(n) = webfetch {
         WEBFETCH_INLINE_MAX.store(n.max(1), Ordering::Relaxed);
+    }
+    if let Some(n) = task {
+        TASK_INLINE_MAX.store(n.max(1), Ordering::Relaxed);
     }
 }
 
@@ -83,6 +94,7 @@ pub fn inline_max_bytes_for(tool: &str) -> usize {
     let n = match tool {
         "bash" => BASH_INLINE_MAX.load(Ordering::Relaxed),
         "webfetch" => WEBFETCH_INLINE_MAX.load(Ordering::Relaxed),
+        "task" => TASK_INLINE_MAX.load(Ordering::Relaxed),
         _ => 0,
     };
     if n == 0 { DEFAULT_INLINE_MAX_BYTES } else { n }

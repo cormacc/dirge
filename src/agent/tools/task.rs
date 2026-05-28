@@ -286,11 +286,23 @@ impl Tool for TaskTool {
                 .await;
             match result {
                 Ok(text) => {
+                    // dirge-nmv5: the chat window always gets the FULL
+                    // text so the user sees the complete subagent
+                    // answer in its Ctrl-N/P window. The parent agent
+                    // sees the relayed text — verbatim when small,
+                    // a head/tail summary plus a `read`-tool hint
+                    // when large (full payload at
+                    // `~/.dirge/transient/<pid>/task-<ts>.txt`).
+                    // Replaces the prior "drop everything past 3000
+                    // chars" behavior that silently lost subagent
+                    // output on the background path.
                     self.emit_chat(SubagentChatEvent::Complete {
                         id: task_id,
                         result: text.clone(),
                     });
-                    Ok(text)
+                    let outcome =
+                        crate::agent::tools::output_relay::relay_if_large("task", text, "");
+                    Ok(outcome.text)
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -363,5 +375,70 @@ mod tests {
             .to_lowercase();
         assert!(bg_desc.contains("automatically") || bg_desc.contains("system-reminder"));
         assert!(bg_desc.contains("do not poll") || bg_desc.contains("not poll"));
+    }
+
+    // dirge-nmv5: short subagent answers (under the 8 KiB / 200-line
+    // budget) must be returned verbatim to the parent agent — no
+    // summary, no relay file, no truncation. The relay is keyed on
+    // the "task" tool name so this exercises exactly the same path
+    // `TaskTool::call` runs.
+    #[test]
+    fn task_short_output_returned_verbatim() {
+        let short = "subagent: 42 is the answer.\n".to_string();
+        let outcome = crate::agent::tools::output_relay::relay_if_large("task", short.clone(), "");
+        assert!(
+            outcome.relayed_to.is_none(),
+            "short output must not trigger the disk relay",
+        );
+        assert_eq!(
+            outcome.text, short,
+            "short subagent output must round-trip unchanged to the parent",
+        );
+    }
+
+    // dirge-nmv5: large subagent answers must NOT silently truncate.
+    // The full text is written to `~/.dirge/transient/<pid>/task-<ts>.txt`
+    // and the parent agent receives a head/tail summary plus a
+    // `read`-tool hint pointing at the transient file. This guards
+    // against regressing to the prior "drop everything past 3000
+    // chars" behavior that lost subagent output.
+    #[test]
+    fn task_large_output_relayed_to_disk_with_summary() {
+        // 64 KiB payload — well past the default 8 KiB inline budget.
+        let huge: String = "subagent line\n".repeat(5_000);
+        let original_len = huge.len();
+        let outcome = crate::agent::tools::output_relay::relay_if_large("task", huge, "");
+
+        // Full payload landed on disk and is readable.
+        let path = outcome
+            .relayed_to
+            .as_ref()
+            .expect("large output must trigger the disk relay");
+        assert!(path.exists(), "relayed file must exist at {path:?}");
+        let written = std::fs::read_to_string(path).expect("read relayed file");
+        assert_eq!(
+            written.len(),
+            original_len,
+            "the FULL original payload must be on disk (not the truncated head)",
+        );
+
+        // Parent agent gets a much-smaller summary plus the recovery
+        // hint — no silent truncation.
+        let summary = &outcome.text;
+        assert!(
+            summary.len() < original_len,
+            "summary should be much smaller than the original payload",
+        );
+        assert!(
+            summary.contains("`read`"),
+            "summary must mention the `read` tool so the agent can recover the full payload: {summary}",
+        );
+        assert!(
+            summary.contains("transient") || summary.contains(".dirge"),
+            "summary must reference the transient path: {summary}",
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_file(path);
     }
 }
