@@ -564,6 +564,60 @@ pub(crate) async fn handle_done(
                 }
             }
         });
+
+        // dirge-mo0w PR-1: memory curator mechanical pass.
+        // Parallel to the skills curator above — same 7-day gate,
+        // same fire-and-forget pattern. Reconciles the
+        // .dirge/memory/.usage.json sidecar against current
+        // MEMORY.md / PITFALLS.md entries, identifies stale
+        // candidates (≥30 days), writes an audit report under
+        // .dirge/memory/.curator_reports/. Does NOT archive
+        // anything in PR-1 — that waits for the LLM
+        // consolidation pass in PR-2 where the model can judge
+        // whether stale entries are also obsolete.
+        let memory_curator_paths = paths.clone();
+        tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut curator = match crate::extras::memory_curator::MemoryCurator::new(
+                    &memory_curator_paths,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "dirge::memory_curator",
+                            error = %e,
+                            "Failed to construct memory curator — skipping run",
+                        );
+                        return;
+                    }
+                };
+                if !curator.should_run_now() {
+                    return;
+                }
+                match curator.run_mechanical_pass() {
+                    Ok(report) => {
+                        tracing::info!(
+                            target: "dirge::memory_curator",
+                            total = %report.total_entries,
+                            added = %report.reconcile.added,
+                            retained = %report.reconcile.retained,
+                            dropped = %report.reconcile.dropped,
+                            stale = %report.stale_candidates.len(),
+                            "memory curator mechanical pass complete",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "dirge::memory_curator",
+                            error = %e,
+                            "memory curator mechanical pass failed",
+                        );
+                    }
+                }
+            })
+            .await
+            .ok();
+        });
     }
 
     #[cfg(feature = "git-worktree")]
