@@ -1573,3 +1573,149 @@ fn truncation_repair_leaves_already_parsed_args_alone() {
         "no repair should be recorded for already-parsed args",
     );
 }
+
+// ============================================================
+// dirge-k6be — turn-end per-tool-result cap wiring
+// ============================================================
+
+/// dirge-k6be end-to-end: a tool that returns a 60 KB result
+/// drops into the transcript verbatim, but the NEXT model
+/// call must see the capped form. Proves `run_loop` calls
+/// `cap_oversized_tool_results` before each
+/// `stream_assistant_response`, matching Reasonix
+/// `loop.ts:486-503` (`healActiveLogBeforeSend`).
+#[tokio::test]
+async fn dirge_k6be_oversized_tool_result_capped_before_next_model_call() {
+    use crate::agent::agent_loop::stream::{LlmContext, StreamFn};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Tool that returns ~60 KB so it's well over the 3000-token
+    // (12 KB) cap.
+    #[derive(Debug)]
+    struct BigOutputTool;
+    impl LoopTool for BigOutputTool {
+        fn name(&self) -> &str {
+            "big_read"
+        }
+        fn description(&self) -> &str {
+            "Big tool"
+        }
+        fn label(&self) -> &str {
+            "BigRead"
+        }
+        fn parameters(&self) -> &Value {
+            static EMPTY: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+            EMPTY.get_or_init(|| serde_json::json!({"type": "object"}))
+        }
+        fn execute<'a>(
+            &'a self,
+            _id: &'a str,
+            _args: Value,
+            _signal: AbortSignal,
+            _on_update: super::super::tool::LoopToolUpdate,
+        ) -> Pin<Box<dyn Future<Output = Result<super::super::LoopToolResult, String>> + Send + 'a>>
+        {
+            let huge = "x".repeat(60_000);
+            Box::pin(async move {
+                Ok(super::super::LoopToolResult {
+                    content: vec![serde_json::json!({
+                        "type": "text",
+                        "text": huge,
+                    })],
+                    details: Value::Null,
+                    terminate: None,
+                })
+            })
+        }
+    }
+
+    // Capture what each model call sees so we can assert the
+    // tool result was capped before the second call.
+    let observed_second_call_payload: std::sync::Arc<Mutex<Option<Vec<Value>>>> =
+        std::sync::Arc::new(Mutex::new(None));
+    let observed_clone = observed_second_call_payload.clone();
+    let counter = std::sync::Arc::new(AtomicUsize::new(0));
+
+    let factory: StreamFn = std::sync::Arc::new(move |ctx: LlmContext, _opts| {
+        let n = counter.fetch_add(1, Ordering::SeqCst);
+        if n == 1 {
+            *observed_clone.lock().unwrap() = Some(ctx.messages.clone());
+        }
+        let msg = if n == 0 {
+            tool_use_response("call-1", "big_read", serde_json::json!({}))
+        } else {
+            text_response("done")
+        };
+        let reason = msg.stop_reason;
+        Box::pin(futures::stream::iter(vec![
+            crate::agent::agent_loop::message::StreamEvent::Done {
+                reason,
+                message: msg,
+                usage: None,
+            },
+        ]))
+    });
+
+    let mut ctx = empty_context();
+    ctx.tools.push(std::sync::Arc::new(BigOutputTool));
+    let mut cfg = build_config();
+    cfg.tool_execution = ToolExecutionMode::Sequential;
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(64);
+    let _ = run_agent_loop(
+        vec![user("start")],
+        ctx,
+        cfg,
+        AbortSignal::new(),
+        &tx,
+        &factory,
+        None,
+        None,
+    )
+    .await;
+
+    let observed = observed_second_call_payload.lock().unwrap();
+    let messages = observed
+        .as_ref()
+        .expect("second model call must have happened");
+
+    // Find the tool-result message in the payload the model
+    // saw on call #2.
+    let tool_result = messages
+        .iter()
+        .find(|m| {
+            m.get("role").and_then(|v| v.as_str()) == Some("toolResult")
+                || m.get("role").and_then(|v| v.as_str()) == Some("tool")
+        })
+        .expect("second call must include the tool result");
+
+    // The result must be CAPPED — its content's total text
+    // length is far below the original 60 KB. The 3000-token
+    // cap = 12 KB; allow some slack for marker overhead.
+    let blocks = tool_result["content"]
+        .as_array()
+        .expect("tool result content should be an array of blocks");
+    let total_text_len: usize = blocks
+        .iter()
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .map(|t| t.len())
+        .sum();
+    assert!(
+        total_text_len < 60_000,
+        "tool result must be capped before the second model call; got {total_text_len} chars",
+    );
+    assert!(
+        total_text_len < 14_000,
+        "capped result must be near the ~12 KB cap; got {total_text_len} chars",
+    );
+    // And the marker must be present.
+    let combined: String = blocks
+        .iter()
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .collect();
+    assert!(
+        combined.contains("truncated"),
+        "capped result must carry the truncation marker",
+    );
+}
