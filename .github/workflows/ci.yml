@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
 jobs:
   rustfmt:
     runs-on: ubuntu-latest
@@ -23,3 +27,62 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+  # dirge-9wtb: feature matrix.
+  #
+  # Default `cargo build` only compiles the code paths reachable
+  # with no optional features. Optional features (acp/plugin/lsp
+  # /loop/mcp/semantic-*) each open a separate code path the
+  # default build never sees. We've already had two regressions
+  # slip through this gap: ACP broke when build_agent gained
+  # session_id, plugin_hooks_tests broke when run_agent_loop
+  # gained memory_provider. The matrix below catches the next
+  # one before merge.
+  #
+  # Strategy: one job per logical feature group + one all-features
+  # job that exercises feature interaction. RUSTFLAGS="-D warnings"
+  # promotes warnings to errors so dead-code regressions also
+  # fail CI instead of silently accumulating.
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            features: ""
+          - name: acp
+            features: "--features acp"
+          - name: plugin
+            features: "--features plugin"
+          - name: mcp
+            features: "--features mcp"
+          - name: lsp
+            features: "--features lsp"
+          - name: loop+git-worktree
+            features: "--features loop,git-worktree"
+          - name: semantic-bash
+            features: "--features semantic-bash"
+          - name: all-features
+            features: "--all-features"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Build
+        run: cargo build --bin dirge ${{ matrix.features }}
+
+      - name: Test
+        # Skip tests for matrix variants where `cargo build` alone
+        # is the canary — they share most code with the default
+        # config, and running every test suite per variant doubles
+        # CI time without commensurate coverage gain. Run tests on
+        # default, plugin (covers plugin-only hook tests), and
+        # all-features (worst-case interaction).
+        if: matrix.name == 'default' || matrix.name == 'plugin' || matrix.name == 'all-features'
+        run: cargo test --bin dirge ${{ matrix.features }}
