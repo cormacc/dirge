@@ -465,6 +465,7 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
     let mut loop_config = LoopConfig {
         convert_to_llm: default_convert_to_llm(),
         transform_context: None,
+        compaction_hooks: None,
         get_api_key: None,
         api_key: None,
         tool_execution: cfg.tool_execution,
@@ -530,6 +531,14 @@ pub fn spawn_loop_runner(cfg: LoopSpawnConfig) -> LoopRunner {
             if loop_config.transform_context.is_none() {
                 loop_config.transform_context = Some(
                     super::plugin_hooks::transform_context_from_plugin_manager(pm.clone()),
+                );
+            }
+            // dirge-jia8: plugin compaction hooks (observe-only
+            // before-compact + custom-summary on-compact), consumed
+            // by run_compaction_pass.
+            if loop_config.compaction_hooks.is_none() {
+                loop_config.compaction_hooks = Some(
+                    super::plugin_hooks::compaction_hooks_from_plugin_manager(pm.clone()),
                 );
             }
             // Phase 5: pi-loop hook surface for plugins.

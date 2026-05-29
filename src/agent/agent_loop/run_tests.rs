@@ -59,6 +59,7 @@ fn build_config() -> LoopConfig {
     LoopConfig {
         convert_to_llm: identity_converter(),
         transform_context: None,
+        compaction_hooks: None,
         get_api_key: None,
         api_key: None,
         tool_execution: ToolExecutionMode::Sequential,
@@ -151,7 +152,7 @@ async fn run_compaction_pass_inserts_summary_and_rotates_session() {
         }));
 
     let (tx, mut rx) = mpsc::channel::<LoopEvent>(8);
-    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, &tx).await;
+    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, None, &tx).await;
     drop(tx);
 
     // (a) older messages dropped.
@@ -201,6 +202,151 @@ async fn run_compaction_pass_inserts_summary_and_rotates_session() {
     assert!(received.contains("## Active Task"));
 }
 
+/// dirge-jia8: a plugin `on-compact` hook supplying a valid summary
+/// is used INSTEAD of the LLM summarizer; the observe-only
+/// `on-before-compact` hook fires. Built from plain closures (no
+/// Janet needed) so it runs on the default feature set.
+#[tokio::test]
+async fn compaction_on_compact_hook_overrides_llm_summary() {
+    use crate::agent::agent_loop::types::CompactionHooks;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut ctx = empty_context();
+    ctx.messages
+        .push(serde_json::json!({"role": "system", "content": "sys"}));
+    ctx.messages
+        .push(serde_json::json!({"role": "user", "content": "initial"}));
+    for i in 0..20 {
+        let role = if i % 2 == 0 { "assistant" } else { "user" };
+        ctx.messages
+            .push(serde_json::json!({"role": role, "content": format!("turn {i} content")}));
+    }
+    ctx.messages
+        .push(serde_json::json!({"role": "user", "content": "latest"}));
+
+    // LLM summarizer returns a DISTINCT summary — if the plugin
+    // override works, this text must NOT appear.
+    let llm_called = std::sync::Arc::new(AtomicUsize::new(0));
+    let llm_called_c = llm_called.clone();
+    let summarize_fn: Option<crate::agent::compression::SummarizeFn> =
+        Some(std::sync::Arc::new(move |_prompt: String| {
+            llm_called_c.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok("## Active Task\nLLM-SUMMARY".to_string()) })
+        }));
+
+    // on-before observe counter + on-compact returning a custom summary.
+    let before_fired = std::sync::Arc::new(AtomicUsize::new(0));
+    let before_c = before_fired.clone();
+    let hooks = CompactionHooks {
+        on_before: std::sync::Arc::new(move |_count, _tokens| {
+            let f = before_c.clone();
+            Box::pin(async move {
+                f.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+        on_compact: std::sync::Arc::new(move |_middle| {
+            Box::pin(async move { Some("## Active Task\nPLUGIN-SUMMARY".to_string()) })
+        }),
+    };
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(8);
+    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, Some(&hooks), &tx).await;
+    drop(tx);
+
+    // on-before-compact observed the fold.
+    assert_eq!(
+        before_fired.load(Ordering::SeqCst),
+        1,
+        "on-before-compact must fire"
+    );
+    // The plugin summary was applied, not the LLM's.
+    let summary_msg = ctx
+        .messages
+        .iter()
+        .find(|m| {
+            m.get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.contains("PLUGIN-SUMMARY"))
+                .unwrap_or(false)
+        })
+        .expect("plugin summary must be in the compacted context");
+    assert!(
+        summary_msg["content"]
+            .as_str()
+            .unwrap()
+            .contains("PLUGIN-SUMMARY")
+    );
+    assert!(
+        !ctx.messages.iter().any(|m| m
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.contains("LLM-SUMMARY"))
+            .unwrap_or(false)),
+        "LLM summary must NOT appear — plugin override should win",
+    );
+    assert_eq!(
+        llm_called.load(Ordering::SeqCst),
+        0,
+        "LLM summarizer must NOT be called when the plugin supplies a valid summary",
+    );
+}
+
+/// dirge-jia8: an `on-compact` hook returning an INVALID summary
+/// (fails validate_summary) falls through to the LLM summarizer —
+/// the plugin can't inject garbage as the summary.
+#[tokio::test]
+async fn compaction_invalid_plugin_summary_falls_through_to_llm() {
+    use crate::agent::agent_loop::types::CompactionHooks;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut ctx = empty_context();
+    ctx.messages
+        .push(serde_json::json!({"role": "system", "content": "sys"}));
+    ctx.messages
+        .push(serde_json::json!({"role": "user", "content": "initial"}));
+    for i in 0..20 {
+        let role = if i % 2 == 0 { "assistant" } else { "user" };
+        ctx.messages
+            .push(serde_json::json!({"role": role, "content": format!("turn {i} content")}));
+    }
+    ctx.messages
+        .push(serde_json::json!({"role": "user", "content": "latest"}));
+
+    let llm_called = std::sync::Arc::new(AtomicUsize::new(0));
+    let llm_called_c = llm_called.clone();
+    let summarize_fn: Option<crate::agent::compression::SummarizeFn> =
+        Some(std::sync::Arc::new(move |_prompt: String| {
+            llm_called_c.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok("## Active Task\nLLM-SUMMARY".to_string()) })
+        }));
+
+    let hooks = CompactionHooks {
+        on_before: std::sync::Arc::new(|_c, _t| Box::pin(async {})),
+        // Invalid: no required section header → validate_summary fails.
+        on_compact: std::sync::Arc::new(move |_middle| {
+            Box::pin(async move { Some("garbage with no section header".to_string()) })
+        }),
+    };
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(8);
+    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, Some(&hooks), &tx).await;
+    drop(tx);
+
+    assert_eq!(
+        llm_called.load(Ordering::SeqCst),
+        1,
+        "invalid plugin summary must fall through to the LLM summarizer",
+    );
+    assert!(
+        ctx.messages.iter().any(|m| m
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.contains("LLM-SUMMARY"))
+            .unwrap_or(false)),
+        "LLM summary should be applied after the invalid plugin summary",
+    );
+}
+
 /// LOOP-9: when no summarizer is wired, the compaction pass
 /// still runs the cheap pruning and emits ContextCompacted, but
 /// does NOT insert a structured summary system message.
@@ -225,7 +371,7 @@ async fn run_compaction_pass_without_summarizer_prunes_only() {
     // Use protect_tail = 2 so the large tool result is eligible
     // for pruning (it's at index 1, end = 4 - 2 = 2, so index
     // 1 is in-range).
-    super::run_compaction_pass(&mut ctx, &None, 2, &None, &tx).await;
+    super::run_compaction_pass(&mut ctx, &None, 2, &None, None, &tx).await;
     drop(tx);
 
     // No SUMMARY_PREFIX message inserted.

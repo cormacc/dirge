@@ -177,6 +177,15 @@ pub struct LoopConfig {
     /// `convertToLlm`.
     pub transform_context: Option<TransformContextFn>,
 
+    /// dirge-jia8: optional plugin compaction hooks fired around the
+    /// auto-fold / `/compress` compaction pass. `on_before` is an
+    /// observe-only notification (cannot cancel — cancelling an
+    /// emergency fold would overflow the context); `on_compact` lets
+    /// a plugin supply a custom summary instead of the LLM
+    /// summarizer. `None` (default) = no plugin compaction
+    /// involvement.
+    pub compaction_hooks: Option<CompactionHooks>,
+
     /// Optional. Port of pi `getApiKey?` (types.ts:196).
     /// Resolves an API key dynamically per request — useful for
     /// short-lived OAuth tokens. `None` means "use `api_key`
@@ -411,6 +420,37 @@ pub type TransformContextFn = std::sync::Arc<
         + Sync,
 >;
 
+/// dirge-jia8: observe-only "compaction is about to run" callback.
+/// Receives `(message_count, estimated_tokens)`. Cannot cancel — the
+/// fold proceeds regardless (cancelling an emergency fold would
+/// overflow the context window on the next call).
+pub type OnBeforeCompactFn = std::sync::Arc<
+    dyn Fn(usize, u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// dirge-jia8: custom-summary callback. Receives the to-be-summarized
+/// middle message slice; returns `Some(summary)` to use instead of
+/// the LLM summarizer, or `None` to fall through to the LLM. The
+/// returned summary is still validated by `validate_summary`; an
+/// invalid one falls through.
+pub type OnCompactFn = std::sync::Arc<
+    dyn Fn(
+            Vec<serde_json::Value>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// dirge-jia8: bundle of plugin compaction hooks. Bundled into one
+/// `LoopConfig` field to keep the constructor surface small.
+#[derive(Clone)]
+pub struct CompactionHooks {
+    pub on_before: OnBeforeCompactFn,
+    pub on_compact: OnCompactFn,
+}
+
 /// `getApiKey` signature. Pi: `(provider: string) =>
 /// Promise<string | undefined> | string | undefined`.
 pub type GetApiKeyFn = std::sync::Arc<
@@ -500,6 +540,7 @@ impl Clone for LoopConfig {
         Self {
             convert_to_llm: self.convert_to_llm.clone(),
             transform_context: self.transform_context.clone(),
+            compaction_hooks: self.compaction_hooks.clone(),
             get_api_key: self.get_api_key.clone(),
             api_key: self.api_key.clone(),
             tool_execution: self.tool_execution,

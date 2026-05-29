@@ -22,9 +22,9 @@ use crate::agent::agent_loop::hooks::AfterToolCallContext;
 use crate::agent::agent_loop::message::{StreamEvent, UserMessage};
 use crate::agent::agent_loop::plugin_hooks::{
     after_hook_from_plugin_manager, before_hook_from_plugin_manager,
-    get_followup_messages_from_plugin_manager, get_steering_messages_from_plugin_manager,
-    prepare_next_turn_from_plugin_manager, should_stop_after_turn_from_plugin_manager,
-    transform_context_from_plugin_manager,
+    compaction_hooks_from_plugin_manager, get_followup_messages_from_plugin_manager,
+    get_steering_messages_from_plugin_manager, prepare_next_turn_from_plugin_manager,
+    should_stop_after_turn_from_plugin_manager, transform_context_from_plugin_manager,
 };
 use crate::agent::agent_loop::result::LoopToolResult;
 use crate::agent::agent_loop::stream::StreamFn;
@@ -67,6 +67,7 @@ fn build_config() -> LoopConfig {
     LoopConfig {
         convert_to_llm: identity_converter(),
         transform_context: None,
+        compaction_hooks: None,
         get_api_key: None,
         api_key: None,
         tool_execution: ToolExecutionMode::Sequential,
@@ -787,4 +788,49 @@ async fn transform_context_passthrough_on_malformed_json() {
     let original = vec![serde_json::json!({"role": "user", "content": "keep me"})];
     let out = f(original.clone()).await;
     assert_eq!(out, original, "malformed JSON → original context preserved");
+}
+
+/// dirge-jia8: a Janet `on-compact` hook calling
+/// harness/set-compact-summary flows through the factory's
+/// on_compact closure (slot/builtin/drain chain end-to-end).
+#[tokio::test]
+async fn on_compact_hook_supplies_custom_summary() {
+    let Some(pm) = try_pm() else {
+        eprintln!("[skipped] PluginManager::try_new failed");
+        return;
+    };
+    {
+        let mut mgr = pm.lock().unwrap();
+        mgr.eval(
+            r#"(defn summ [_ctx] (harness/set-compact-summary "Active Task: plugin summary"))"#,
+        )
+        .expect("install summ");
+        mgr.register("on-compact", "summ");
+    }
+    let hooks = compaction_hooks_from_plugin_manager(pm.clone());
+    let middle = vec![serde_json::json!({"role": "user", "content": "old turn"})];
+    let summary = (hooks.on_compact)(middle).await;
+    assert_eq!(
+        summary.as_deref(),
+        Some("Active Task: plugin summary"),
+        "on-compact hook's summary must flow through the factory",
+    );
+}
+
+/// dirge-jia8: no `on-compact` hook → factory returns None (the
+/// loop falls through to the LLM summarizer). on-before is
+/// observe-only and never panics.
+#[tokio::test]
+async fn compaction_hooks_passthrough_without_hooks() {
+    let Some(pm) = try_pm() else {
+        eprintln!("[skipped] PluginManager::try_new failed");
+        return;
+    };
+    let hooks = compaction_hooks_from_plugin_manager(pm.clone());
+    // observe-only before hook: must not panic.
+    (hooks.on_before)(5, 1234).await;
+    // no on-compact hook registered → None.
+    let summary =
+        (hooks.on_compact)(vec![serde_json::json!({"role": "user", "content": "x"})]).await;
+    assert_eq!(summary, None, "no on-compact hook → fall through to LLM");
 }

@@ -434,6 +434,14 @@ impl PluginManager {
         self.take_string_slot("harness-replace-context")
     }
 
+    /// dirge-jia8: read and clear the `harness-compact-summary` slot.
+    /// Set by an `on-compact` hook via `harness/set-compact-summary`;
+    /// the host uses it as the compaction summary instead of the LLM
+    /// (subject to the same validity check).
+    pub fn take_compact_summary(&mut self) -> Option<String> {
+        self.take_string_slot("harness-compact-summary")
+    }
+
     /// Shared body of the three `take_pending_*` functions: probe the type
     /// to disambiguate Janet's nil from a string with the characters "nil",
     /// fetch the value if it's a string, then clear the slot.

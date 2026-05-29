@@ -427,6 +427,7 @@ mod tests {
         LoopConfig {
             convert_to_llm: convert,
             transform_context: None,
+            compaction_hooks: None,
             get_api_key: None,
             api_key: None,
             tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,
@@ -738,6 +739,7 @@ mod tests {
         let config = LoopConfig {
             convert_to_llm: convert,
             transform_context: Some(transform),
+            compaction_hooks: None,
             get_api_key: None,
             api_key: None,
             tool_execution: crate::agent::agent_loop::ToolExecutionMode::Parallel,

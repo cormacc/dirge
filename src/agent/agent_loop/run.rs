@@ -174,6 +174,7 @@ async fn run_compaction_pass(
     summarize_fn: &Option<crate::agent::compression::SummarizeFn>,
     protect_tail: usize,
     memory_provider: &Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
+    compaction_hooks: Option<&crate::agent::agent_loop::types::CompactionHooks>,
     emit: &mpsc::Sender<LoopEvent>,
 ) {
     run_compaction_pass_with_focus(
@@ -182,6 +183,7 @@ async fn run_compaction_pass(
         protect_tail,
         None,
         memory_provider,
+        compaction_hooks,
         emit,
     )
     .await
@@ -204,11 +206,19 @@ async fn run_compaction_pass_with_focus(
     protect_tail: usize,
     focus_topic: Option<String>,
     memory_provider: &Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
+    compaction_hooks: Option<&crate::agent::agent_loop::types::CompactionHooks>,
     emit: &mpsc::Sender<LoopEvent>,
 ) {
     use crate::agent::compression;
 
     let before = compression::estimate_messages_tokens(&current_context.messages);
+
+    // dirge-jia8: observe-only `on-before-compact` plugin hook. It
+    // CANNOT cancel — the fold proceeds regardless (cancelling an
+    // emergency fold would overflow the next request).
+    if let Some(hooks) = compaction_hooks {
+        (hooks.on_before)(current_context.messages.len(), before).await;
+    }
 
     // First pass: cheap tool-output pruning. No LLM call.
     let pruned = compression::prune_tool_outputs(&current_context.messages, protect_tail);
@@ -247,13 +257,30 @@ async fn run_compaction_pass_with_focus(
             // the /compress slash path's instructions augmentation.
             let augmented_focus =
                 build_augmented_focus(focus_topic.as_deref(), memory_provider.as_ref(), &middle);
-            let prompt = compression::build_summary_prompt(
-                &middle,
-                budget,
-                prev.as_deref(),
-                augmented_focus.as_deref(),
-            );
-            match sfn(prompt).await {
+            // dirge-jia8: give the `on-compact` plugin hook first
+            // refusal — if it supplies a valid summary, use it
+            // instead of calling the LLM summarizer. An absent hook,
+            // no summary, or an invalid one falls through to the LLM.
+            let plugin_summary: Option<String> = match compaction_hooks {
+                Some(hooks) => match (hooks.on_compact)(middle.clone()).await {
+                    Some(s) if compression::validate_summary(&s) => Some(s),
+                    _ => None,
+                },
+                None => None,
+            };
+            let summary_result: Result<String, _> = match plugin_summary {
+                Some(s) => Ok(s),
+                None => {
+                    let prompt = compression::build_summary_prompt(
+                        &middle,
+                        budget,
+                        prev.as_deref(),
+                        augmented_focus.as_deref(),
+                    );
+                    sfn(prompt).await
+                }
+            };
+            match summary_result {
                 Ok(summary) if compression::validate_summary(&summary) => {
                     let new_msgs =
                         compression::apply_summary(&current_context.messages, &summary, start, end);
@@ -480,6 +507,7 @@ pub async fn run_loop(
                         &summarize_fn,
                         5, // protect last 5 messages
                         &memory_provider,
+                        config.compaction_hooks.as_ref(),
                         emit,
                     )
                     .await;
@@ -800,6 +828,7 @@ pub async fn run_loop(
                                 &summarize_fn,
                                 5, // protect last 5 messages
                                 &memory_provider,
+                                config.compaction_hooks.as_ref(),
                                 emit,
                             )
                             .await;
@@ -819,6 +848,7 @@ pub async fn run_loop(
                             &summarize_fn,
                             3, // protect only last 3
                             &memory_provider,
+                            config.compaction_hooks.as_ref(),
                             emit,
                         )
                         .await;

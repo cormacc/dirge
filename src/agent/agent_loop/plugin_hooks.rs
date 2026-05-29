@@ -482,6 +482,63 @@ pub fn transform_context_from_plugin_manager(
     })
 }
 
+/// dirge-jia8: build the plugin `CompactionHooks` bundle from a
+/// PluginManager. `on_before` dispatches `on-before-compact`
+/// (observe-only — the result is ignored, it cannot cancel the
+/// fold); `on_compact` dispatches `on-compact` with the middle
+/// message slice and returns any `harness/set-compact-summary`
+/// value (the loop validates it before use, falling through to the
+/// LLM summarizer otherwise).
+pub fn compaction_hooks_from_plugin_manager(
+    pm: Arc<Mutex<PluginManager>>,
+) -> super::types::CompactionHooks {
+    let pm_before = pm.clone();
+    let on_before: super::types::OnBeforeCompactFn = Arc::new(move |count: usize, tokens: u64| {
+        let pm = pm_before.clone();
+        Box::pin(async move {
+            let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx = format!("@{{:message-count {count} :tokens {tokens}}}");
+            if let Err(e) = mgr.dispatch("on-before-compact", &ctx) {
+                tracing::warn!(
+                    target: "dirge::plugin",
+                    error = %e,
+                    "on-before-compact hook error (observe-only; fold proceeds)",
+                );
+            }
+        })
+    });
+
+    let on_compact: super::types::OnCompactFn = Arc::new(move |middle: Vec<serde_json::Value>| {
+        let pm = pm.clone();
+        Box::pin(async move {
+            let Ok(middle_json) = serde_json::to_string(&middle) else {
+                return None;
+            };
+            let mut mgr = pm.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx = format!(
+                "@{{:messages \"{}\"}}",
+                crate::plugin::escape_janet_string(&middle_json)
+            );
+            match mgr.dispatch("on-compact", &ctx) {
+                Ok(_) => mgr.take_compact_summary(),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "dirge::plugin",
+                        error = %e,
+                        "on-compact hook error — falling back to LLM summarizer",
+                    );
+                    None
+                }
+            }
+        })
+    });
+
+    super::types::CompactionHooks {
+        on_before,
+        on_compact,
+    }
+}
+
 /// Parse a Janet-side level string into `ThinkingLevel`. Pi
 /// values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`,
 /// `"xhigh"`. Unknown values produce None (plugin's typo is

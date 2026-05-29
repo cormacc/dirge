@@ -49,6 +49,7 @@ fn build_config() -> LoopConfig {
     LoopConfig {
         convert_to_llm: identity_converter(),
         transform_context: None,
+        compaction_hooks: None,
         get_api_key: None,
         api_key: None,
         tool_execution: ToolExecutionMode::Parallel,

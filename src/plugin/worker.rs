@@ -280,6 +280,17 @@ const HARNESS_INIT: &str = r#"
   (when (string? json-array)
     (set harness-replace-context json-array)))
 
+# dirge-jia8: supply a custom compaction summary. Plugins call this
+# from the `on-compact` hook (which receives the to-be-summarized
+# middle messages as JSON in ctx :messages). The host uses this
+# string instead of calling the LLM summarizer, provided it passes
+# the same validity check. The `on-before-compact` hook is
+# observe-only (no slot) — it cannot cancel the fold.
+(var harness-compact-summary nil)
+(defn harness/set-compact-summary [text]
+  (when (string? text)
+    (set harness-compact-summary text)))
+
 # Notification queue. Plugins call (harness/notify msg level?)
 # to push a line into the host's chat display. Stored as a
 # `level\tmsg\n` blob; the host's drain_notifications

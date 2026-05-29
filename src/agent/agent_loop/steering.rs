@@ -353,6 +353,7 @@ mod tests {
                     .collect()
             }),
             transform_context: None,
+            compaction_hooks: None,
             get_api_key: None,
             api_key: None,
             tool_execution: ToolExecutionMode::Sequential,

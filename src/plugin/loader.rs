@@ -29,6 +29,14 @@ pub const HOOK_NAMES: &[&str] = &[
     // messages (JSON) in ctx :messages; may call
     // harness/replace-context to prune/inject for that call.
     "transform-context",
+    // dirge-jia8: observe-only notification fired before a
+    // compaction fold; receives ctx :message-count and :tokens.
+    // Cannot cancel the fold.
+    "on-before-compact",
+    // dirge-jia8: fires when summarizing the middle slice; receives
+    // ctx :messages (JSON); may call harness/set-compact-summary to
+    // supply a summary instead of the LLM summarizer.
+    "on-compact",
 ];
 
 /// Filter an input candidate list to only paths that exist as
