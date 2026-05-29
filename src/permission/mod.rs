@@ -18,7 +18,6 @@ pub fn apply_prompt_deny(perm: &Option<checker::PermCheck>, deny: &[String]) {
 }
 
 use serde::Deserialize;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -28,110 +27,67 @@ pub enum Action {
     Deny,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum ToolPerm {
-    Simple(Action),
-    Granular(HashMap<String, Action>),
+/// The operation class a rule governs — the resource KIND, not a tool
+/// name. `Any` (`"*"`) matches every operation; `tool` on the rule can
+/// narrow to a concrete tool when needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpSpec {
+    #[default]
+    #[serde(rename = "*", alias = "any")]
+    Any,
+    Read,
+    Edit,
+    Execute,
+    Network,
+    Mcp,
+    Memory,
+    Skill,
+    Agent,
+    Meta,
 }
 
+/// One configured authorization rule. The ordered `rules` list reads
+/// top-to-bottom; **last match wins**. Glob style is inferred from the
+/// operation (path-style for read/edit, shell-style for execute/etc.).
+///
+/// ```jsonc
+/// { "op": "edit",    "match": "/etc/**",  "effect": "deny" }
+/// { "op": "execute", "match": "cargo *",  "effect": "allow" }
+/// { "op": "mcp",     "match": "lattice:*", "effect": "allow" }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuleConfig {
+    #[serde(default)]
+    pub op: OpSpec,
+    #[serde(rename = "match")]
+    pub pattern: String,
+    pub effect: Action,
+    /// Optional: narrow the rule to a single concrete tool name (e.g.
+    /// `"grep"` so a Read rule doesn't also gate `read`).
+    #[serde(default)]
+    pub tool: Option<String>,
+}
+
+/// Permission configuration: a default effect, an ordered rule list,
+/// out-of-project rules, and the loop-guard toggle. Built-in defaults
+/// (read-only/memory/skill/dev-null/in-cwd-write allows + the curated
+/// safe-bash rules) live in the engine and aren't configured here.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PermissionConfig {
-    #[serde(rename = "*")]
+    /// Fallback effect when no rule matches (alias `*`). Defaults to Ask.
+    #[serde(rename = "*", alias = "default")]
     pub default: Option<Action>,
-    pub bash: Option<ToolPerm>,
-    pub read: Option<ToolPerm>,
-    pub write: Option<ToolPerm>,
-    pub edit: Option<ToolPerm>,
-    pub grep: Option<ToolPerm>,
-    pub find_files: Option<ToolPerm>,
-    pub list_dir: Option<ToolPerm>,
-    /// `glob` — fast filename matcher. Read-only filesystem walker;
-    /// per-pattern rules let users restrict which paths the LLM can
-    /// glob (e.g. allow only project root, deny `/etc/*`). Adversarial-
-    /// review #5 added.
-    pub glob: Option<ToolPerm>,
-    /// `repo_overview` — structural codebase map. Read-only walker;
-    /// per-pattern rules can restrict which roots it can summarize.
-    /// Adversarial-review #5 added.
-    pub repo_overview: Option<ToolPerm>,
-    pub write_todo_list: Option<ToolPerm>,
-    /// `apply_patch` — bulk multi-file patch tool. Mutates the
-    /// filesystem like `write`/`edit`; deserves per-pattern rules.
-    pub apply_patch: Option<ToolPerm>,
-    /// `lsp` — language-server queries (definition, references,
-    /// hover, etc.). Reads project files via the language server.
-    pub lsp: Option<ToolPerm>,
-    /// `question` — interactive user-input solicitation tool. Per-
-    /// pattern rules let users restrict which kinds of questions
-    /// the agent can ask.
-    pub question: Option<ToolPerm>,
-    /// `webfetch` — HTTP(S) fetch tool. Pattern rules can be used to
-    /// restrict the URLs (e.g., \"https://docs.example.com/*\":
-    /// allow).
-    pub webfetch: Option<ToolPerm>,
-    /// `websearch` — Exa-backed web search. Pattern rules restrict
-    /// the query strings.
-    pub websearch: Option<ToolPerm>,
-    /// `task` — subagent runner. The pattern is the subagent prompt.
-    pub task: Option<ToolPerm>,
-    /// `task_status` — companion query tool for `task`. Read-only;
-    /// included for completeness so users can deny it independently
-    /// (e.g. to force background-only invocations).
-    pub task_status: Option<ToolPerm>,
-    /// `memory` — persistent project memory store. Pattern rules
-    /// restrict the memory keys / operations.
-    pub memory: Option<ToolPerm>,
-    /// `skill` — Claude-compatible skill loading. Pattern rules
-    /// restrict which skills can be loaded.
-    pub skill: Option<ToolPerm>,
-    /// Semantic code-graph tools (tree-sitter-backed): `list_symbols`,
-    /// `get_symbol_body`, `find_definition`, `find_callers`,
-    /// `find_callees`. One per tool — pattern matches against the
-    /// tool's primary argument (path for body/list, symbol name for
-    /// find_*).
-    pub list_symbols: Option<ToolPerm>,
-    pub get_symbol_body: Option<ToolPerm>,
-    pub find_definition: Option<ToolPerm>,
-    pub find_callers: Option<ToolPerm>,
-    pub find_callees: Option<ToolPerm>,
-    /// `mcp_tool` — generic catch-all for ALL MCP-provided tools.
-    /// Each MCP tool is permission-checked as
-    /// `mcp_tool:<server>:<tool>`; pattern rules here match against
-    /// that string. e.g.
-    /// `{ \"mcp_tool:filesystem:*\": \"deny\" }` blocks every tool
-    /// from the `filesystem` MCP server.
-    pub mcp_tool: Option<ToolPerm>,
-    pub external_directory: Option<HashMap<String, Action>>,
+    /// Loop-guard control: `"allow"` disables the retry-loop hard-deny;
+    /// any other value (default) keeps it on.
     pub doom_loop: Option<Action>,
-    /// M2 (dirge-cep): unified per-tool rule map. Lets a user write
-    /// rules for ANY tool name (including plugin / MCP / future-added
-    /// tools) without dirge extending its `PermissionConfig` struct.
-    ///
-    /// Schema (JSON):
-    /// ```json
-    /// "permission": {
-    ///   "tools": {
-    ///     "bash":       { "rm *": "deny", "git *": "allow" },
-    ///     "write":      { "/etc/**": "deny", "**": "ask" },
-    ///     "skill":      "allow",
-    ///     "plugin_xyz": "ask"
-    ///   }
-    /// }
-    /// ```
-    ///
-    /// Mirrors opencode's permission shape (Schema.StructWithRest with
-    /// Schema.Record(String, Rule)) and maki's per-tool TOML sections.
-    /// Coexists with the legacy per-tool fields above for back-compat:
-    /// both are merged into the same `HashMap<tool, Vec<(Pattern,
-    /// Action)>>` inside `PermissionChecker::new`. If both name the
-    /// same tool, the `tools` map wins (it's the explicit new shape).
-    ///
-    /// Deprecation path: the legacy `bash`/`read`/`write`/... fields
-    /// stay through one release cycle, then get removed once docs and
-    /// example configs migrate to `tools`. Internally the checker
-    /// treats them as syntactic sugar for `tools.{name}`.
-    pub tools: Option<HashMap<String, ToolPerm>>,
+    /// Ordered authorization rules (last match wins).
+    #[serde(default)]
+    pub rules: Vec<RuleConfig>,
+    /// Rules for paths OUTSIDE the working directory (op defaults to
+    /// `*`). An out-of-project write with no matching rule prompts.
+    #[serde(default)]
+    pub external_directory: Vec<RuleConfig>,
 }
 
 /// Per-session security mode. Selected via `--yolo` / `--accept-all` /

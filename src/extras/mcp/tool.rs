@@ -666,9 +666,8 @@ mod tests {
 
     use crate::agent::tools::check_perm;
     use crate::permission::{
-        Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+        Action, OpSpec, PermissionConfig, RuleConfig, SecurityMode, checker::PermissionChecker,
     };
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
 
     /// Build a PermissionChecker anchored at a temporary directory
@@ -740,10 +739,13 @@ mod tests {
     async fn mcp_allow_external_paths_does_not_bypass_deny_rules() {
         // Install a deny rule that matches the qualified MCP key
         // `mcp_tool:indexer:scan`.
-        let mut mcp_rules: HashMap<String, Action> = HashMap::new();
-        mcp_rules.insert("mcp_tool:indexer:*".to_string(), Action::Deny);
         let config = PermissionConfig {
-            mcp_tool: Some(ToolPerm::Granular(mcp_rules)),
+            rules: vec![RuleConfig {
+                op: OpSpec::Mcp,
+                pattern: "mcp_tool:indexer:*".to_string(),
+                effect: Action::Deny,
+                tool: None,
+            }],
             ..Default::default()
         };
         let (perm, _cwd) = mk_perm(config);

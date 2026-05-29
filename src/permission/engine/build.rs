@@ -21,7 +21,7 @@ use super::policy::{Decider, Modifier, PolicyCtx};
 use super::types::{Effect, Operation, Resource};
 use super::{Engine, classify::pattern_for_tool};
 use crate::permission::path::{canonicalize_for_cache, resolve_absolute};
-use crate::permission::{Action, PermissionConfig, ToolPerm};
+use crate::permission::{Action, PermissionConfig};
 
 /// Default retry-loop threshold: the Nth identical *prompted* request
 /// is hard-denied. (The breaking config in Phase 4 makes this tunable.)
@@ -96,39 +96,42 @@ pub fn classify_path(raw: &str, working_dir: &str) -> Resource {
     }
 }
 
-/// Translate one legacy `ToolPerm` (or `tools`-map entry) into rules
-/// narrowed to `tool`.
-fn rules_from_tool_perm(tool: &str, tp: &ToolPerm) -> Vec<Rule> {
-    let op = OpMatch::One(tool_operation(tool));
-    // write/edit/apply_patch are the only tools mapping to
-    // Operation::Edit, so leaving the rule tool-unnarrowed makes a
-    // legacy `edit: deny` cover all three — the old F2 aliasing,
-    // now a natural consequence of the shared operation. Other
-    // shared-op tools (the Read group) stay tool-narrowed so a
-    // `grep` rule doesn't bleed onto `read`.
-    let tool_sel = if matches!(tool, "write" | "edit" | "apply_patch") {
-        None
-    } else {
-        Some(tool.to_string())
-    };
-    match tp {
-        ToolPerm::Simple(action) => vec![Rule {
-            op,
-            tool: tool_sel.clone(),
-            pattern: pattern_for_tool(tool, "*"),
-            effect: (*action).into(),
-            original: format!("{tool}:*"),
-        }],
-        ToolPerm::Granular(map) => map
-            .iter()
-            .map(|(pat, action)| Rule {
-                op,
-                tool: tool_sel.clone(),
-                pattern: pattern_for_tool(tool, pat),
-                effect: (*action).into(),
-                original: format!("{tool}:{pat}"),
-            })
-            .collect(),
+/// Map a config `OpSpec` to the engine's `OpMatch`.
+fn op_match(op: crate::permission::OpSpec) -> OpMatch {
+    use crate::permission::OpSpec;
+    match op {
+        OpSpec::Any => OpMatch::Any,
+        OpSpec::Read => OpMatch::One(Operation::Read),
+        OpSpec::Edit => OpMatch::One(Operation::Edit),
+        OpSpec::Execute => OpMatch::One(Operation::Execute),
+        OpSpec::Network => OpMatch::One(Operation::Network),
+        OpSpec::Mcp => OpMatch::One(Operation::Mcp),
+        OpSpec::Memory => OpMatch::One(Operation::Memory),
+        OpSpec::Skill => OpMatch::One(Operation::Skill),
+        OpSpec::Agent => OpMatch::One(Operation::Agent),
+        OpSpec::Meta => OpMatch::One(Operation::Meta),
+    }
+}
+
+/// Glob style for a rule's operation: path-style (`*` = one segment)
+/// for file ops, shell-style for everything else.
+fn pattern_for_op(op: crate::permission::OpSpec, pat: &str) -> crate::permission::pattern::Pattern {
+    use crate::permission::OpSpec;
+    use crate::permission::pattern::Pattern;
+    match op {
+        OpSpec::Read | OpSpec::Edit | OpSpec::Any => Pattern::new(pat),
+        _ => Pattern::new_command(pat),
+    }
+}
+
+/// Build an engine [`Rule`] from a config rule.
+fn rule_from_config(rc: &crate::permission::RuleConfig) -> Rule {
+    Rule {
+        op: op_match(rc.op),
+        tool: rc.tool.clone(),
+        pattern: pattern_for_op(rc.op, &rc.pattern),
+        effect: rc.effect.into(),
+        original: rc.pattern.clone(),
     }
 }
 
@@ -137,92 +140,40 @@ impl Engine {
     /// decider order encodes precedence; see `policies.rs`.
     pub fn from_config(config: &PermissionConfig) -> Engine {
         let mut rules: Vec<Rule> = Vec::new();
-        let mut user_configured: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
 
-        // Legacy per-tool fields, in a stable order.
-        let legacy: [(&str, &Option<ToolPerm>); 25] = [
-            ("bash", &config.bash),
-            ("read", &config.read),
-            ("write", &config.write),
-            ("edit", &config.edit),
-            ("grep", &config.grep),
-            ("find_files", &config.find_files),
-            ("list_dir", &config.list_dir),
-            ("glob", &config.glob),
-            ("repo_overview", &config.repo_overview),
-            ("write_todo_list", &config.write_todo_list),
-            ("apply_patch", &config.apply_patch),
-            ("lsp", &config.lsp),
-            ("question", &config.question),
-            ("webfetch", &config.webfetch),
-            ("websearch", &config.websearch),
-            ("task", &config.task),
-            ("task_status", &config.task_status),
-            ("memory", &config.memory),
-            ("skill", &config.skill),
-            ("list_symbols", &config.list_symbols),
-            ("get_symbol_body", &config.get_symbol_body),
-            ("find_definition", &config.find_definition),
-            ("find_callers", &config.find_callers),
-            ("find_callees", &config.find_callees),
-            ("mcp_tool", &config.mcp_tool),
-        ];
-        for (tool, tp) in legacy {
-            if let Some(tp) = tp {
-                rules.extend(rules_from_tool_perm(tool, tp));
-                user_configured.insert(tool.to_string());
-            }
-        }
-
-        // M2 `tools` map (appended after legacy → last-match-wins).
-        if let Some(tools_map) = &config.tools {
-            for (tool, tp) in tools_map {
-                rules.extend(rules_from_tool_perm(tool, tp));
-                user_configured.insert(tool.clone());
-            }
-        }
-
-        // Bash defaults — only if the user supplied no bash rules.
-        if !user_configured.contains("bash") {
-            for (pat, action) in crate::permission::default_bash_rules() {
-                rules.push(Rule {
-                    op: OpMatch::One(Operation::Execute),
-                    tool: Some("bash".to_string()),
-                    pattern: pattern_for_tool("bash", pat),
-                    effect: action.into(),
-                    original: format!("bash:{pat}"),
-                });
-            }
-        }
-
-        // MCP default: prompt unless the user pinned a server.
-        if !user_configured.contains("mcp_tool") {
+        // Built-in safe-bash defaults (git status / cargo / test
+        // runners allow, `rm -rf /**` etc. deny). Installed FIRST so a
+        // user rule for the same command wins by last-match. These are
+        // dirge's "sane defaults" for Execute, distinct from the
+        // BuiltinAllowPolicy (reads / memory / skill / dev-null / cwd).
+        for (pat, action) in crate::permission::default_bash_rules() {
             rules.push(Rule {
-                op: OpMatch::One(Operation::Mcp),
-                tool: Some("mcp_tool".to_string()),
-                pattern: pattern_for_tool("mcp_tool", "*"),
-                effect: Effect::Ask,
-                original: "mcp_tool:*".to_string(),
+                op: OpMatch::One(Operation::Execute),
+                tool: Some("bash".to_string()),
+                pattern: pattern_for_tool("bash", pat),
+                effect: action.into(),
+                original: format!("bash:{pat}"),
             });
         }
+        // MCP default: prompt unless a user rule allows a server.
+        rules.push(Rule {
+            op: OpMatch::One(Operation::Mcp),
+            tool: None,
+            pattern: pattern_for_tool("mcp_tool", "*"),
+            effect: Effect::Ask,
+            original: "mcp:*".to_string(),
+        });
 
-        // external_directory rules (path-style patterns).
+        // User rules, in order — appended after the defaults so they
+        // override by last-match-wins.
+        rules.extend(config.rules.iter().map(rule_from_config));
+
+        // external_directory rules (governs out-of-project paths).
         let ext_rules: Vec<Rule> = config
             .external_directory
-            .as_ref()
-            .map(|m| {
-                m.iter()
-                    .map(|(pat, action)| Rule {
-                        op: OpMatch::Any,
-                        tool: None,
-                        pattern: crate::permission::pattern::Pattern::new(pat),
-                        effect: (*action).into(),
-                        original: pat.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+            .iter()
+            .map(rule_from_config)
+            .collect();
 
         let default: Effect = config.default.unwrap_or(Action::Ask).into();
 
@@ -262,7 +213,6 @@ mod tests {
     use super::*;
     use crate::permission::SecurityMode;
     use crate::permission::engine::types::AccessRequest;
-    use std::collections::HashMap;
 
     fn req(
         op: Operation,
@@ -352,16 +302,30 @@ mod tests {
         assert_eq!(d.effect, Effect::Ask, "unknown bash command prompts");
     }
 
+    fn rule(
+        op: crate::permission::OpSpec,
+        m: &str,
+        effect: Action,
+    ) -> crate::permission::RuleConfig {
+        crate::permission::RuleConfig {
+            op,
+            pattern: m.to_string(),
+            effect,
+            tool: None,
+        }
+    }
+
     #[test]
-    fn user_bash_rule_suppresses_defaults() {
-        let mut tools = HashMap::new();
-        tools.insert("bash".to_string(), ToolPerm::Simple(Action::Allow));
+    fn user_execute_rule_overrides_default() {
+        use crate::permission::OpSpec;
+        // A blanket `execute **: allow` (appended after the built-in
+        // bash defaults) wins by last-match, so even an unknown command
+        // is allowed.
         let cfg = PermissionConfig {
-            tools: Some(tools),
+            rules: vec![rule(OpSpec::Execute, "**", Action::Allow)],
             ..Default::default()
         };
         let e = Engine::from_config(&cfg);
-        // With a blanket user `bash: allow`, even an unknown command is allowed
         let d = e.authorize(&req(
             Operation::Execute,
             "bash",
@@ -376,11 +340,10 @@ mod tests {
 
     #[test]
     fn user_rule_overrides_builtin_allow() {
+        use crate::permission::OpSpec;
         // read is builtin-allowed; a user deny rule must win.
-        let mut read = HashMap::new();
-        read.insert("/secret/**".to_string(), Action::Deny);
         let cfg = PermissionConfig {
-            read: Some(ToolPerm::Granular(read)),
+            rules: vec![rule(OpSpec::Read, "/secret/**", Action::Deny)],
             ..Default::default()
         };
         let e = Engine::from_config(&cfg);
@@ -407,10 +370,9 @@ mod tests {
 
     #[test]
     fn external_directory_rule_allows_outside_path() {
-        let mut ext = HashMap::new();
-        ext.insert("/shared/**".to_string(), Action::Allow);
+        use crate::permission::OpSpec;
         let cfg = PermissionConfig {
-            external_directory: Some(ext),
+            external_directory: vec![rule(OpSpec::Any, "/shared/**", Action::Allow)],
             ..Default::default()
         };
         let e = Engine::from_config(&cfg);

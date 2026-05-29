@@ -432,10 +432,19 @@ pub async fn check_perm_path_resolve(
 mod tests {
     use super::*;
     use crate::permission::{
-        Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+        Action, OpSpec, PermissionConfig, RuleConfig, SecurityMode, checker::PermissionChecker,
     };
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    /// Test helper: build a single op-based rule (tool-agnostic).
+    fn rule(op: OpSpec, pattern: &str, effect: Action) -> RuleConfig {
+        RuleConfig {
+            op,
+            pattern: pattern.to_string(),
+            effect,
+            tool: None,
+        }
+    }
 
     /// F2 (dirge-jlj): `enforce(write, ...)` MUST also consult the
     /// `edit` rules. A user writing `edit: { "**": "deny" }`
@@ -443,10 +452,8 @@ mod tests {
     /// `EDIT_TOOLS` aliasing.
     #[tokio::test]
     async fn enforce_write_aliases_to_edit_deny() {
-        let mut edit_rules = HashMap::new();
-        edit_rules.insert("**".to_string(), Action::Deny);
         let config = PermissionConfig {
-            edit: Some(ToolPerm::Granular(edit_rules)),
+            rules: vec![rule(OpSpec::Edit, "**", Action::Deny)],
             ..Default::default()
         };
         let checker = PermissionChecker::new(
@@ -485,13 +492,14 @@ mod tests {
     /// but `edit` is Deny, the Deny wins.
     #[tokio::test]
     async fn enforce_write_alias_most_restrictive_wins() {
-        let mut edit_rules = HashMap::new();
-        edit_rules.insert("/etc/**".to_string(), Action::Deny);
-        let mut write_rules = HashMap::new();
-        write_rules.insert("**".to_string(), Action::Allow);
+        // write/edit/apply_patch share Operation::Edit, so both rules
+        // live in ONE ordered ruleset (last-match-wins): allow all,
+        // then deny /etc/**.
         let config = PermissionConfig {
-            edit: Some(ToolPerm::Granular(edit_rules)),
-            write: Some(ToolPerm::Granular(write_rules)),
+            rules: vec![
+                rule(OpSpec::Edit, "**", Action::Allow),
+                rule(OpSpec::Edit, "/etc/**", Action::Deny),
+            ],
             ..Default::default()
         };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
@@ -524,10 +532,8 @@ mod tests {
     /// `read` shouldn't be affected by edit rules.
     #[tokio::test]
     async fn enforce_read_does_not_alias_to_edit() {
-        let mut edit_rules = HashMap::new();
-        edit_rules.insert("**".to_string(), Action::Deny);
         let config = PermissionConfig {
-            edit: Some(ToolPerm::Granular(edit_rules)),
+            rules: vec![rule(OpSpec::Edit, "**", Action::Deny)],
             ..Default::default()
         };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);

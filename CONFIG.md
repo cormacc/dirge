@@ -38,19 +38,16 @@ Example:
   },
   "permission": {
     "*": "ask",
-    "read": "allow",
-    "write": {
-      "**/*.rs": "allow",
-      "**": "ask"
-    },
-    "bash": {
-      "cargo test": "allow",
-      "rm **": "deny"
-    },
-    "external_directory": {
-      "/tmp/**": "allow",
-      "/**": "ask"
-    },
+    "rules": [
+      { "op": "edit",    "match": "**/*.rs",   "effect": "allow" },
+      { "op": "edit",    "match": "**",        "effect": "ask"   },
+      { "op": "execute", "match": "cargo test", "effect": "allow" },
+      { "op": "execute", "match": "rm **",     "effect": "deny"  }
+    ],
+    "external_directory": [
+      { "match": "/tmp/**", "effect": "allow" },
+      { "match": "/**",     "effect": "ask"   }
+    ],
     "doom_loop": "ask"
   }
 }
@@ -88,38 +85,39 @@ Accepted top-level keys:
 | `mcp_servers`             | object  | MCP server map when compiled with the `mcp` feature. When omitted, defaults to a single Exa Web Search server; see below.                                                   |
 | `acp_servers`             | object  | ACP server config map when compiled with the `acp` feature. See the ACP section below.                                                                                       |
 
-Permission actions are lowercase strings: `allow`, `ask`, or `deny`. Each tool
-rule can be a single action or an object mapping glob-like patterns to actions.
-Supported permission tool keys are:
+Permission actions are lowercase strings: `allow`, `ask`, or `deny`. `rules`
+is an **ordered list** read top-to-bottom; **last match wins**. Each rule has:
 
-- File / shell: `bash`, `read`, `write`, `edit`, `grep`, `find_files`,
-  `list_dir`, `apply_patch`, `write_todo_list`
-- LSP / question: `lsp`, `question`
-- Web: `webfetch`, `websearch`
-- Subagent / state: `task`, `task_status`, `memory`, `skill`
-- Semantic (tree-sitter): `list_symbols`, `get_symbol_body`,
-  `find_definition`, `find_callers`, `find_callees`
-- MCP umbrella: `mcp_tool` — patterns match the full key
-  `mcp_tool:{server}:{tool}` so `{"mcp_tool:fs:*": "deny"}` blocks
-  every tool from a `fs` MCP server.
+- `op` — the operation class it governs (NOT a tool name). One of:
+  `read`, `edit`, `execute`, `network`, `mcp`, `memory`, `skill`,
+  `agent`, `meta`, or `*` (any). `edit` covers write/edit/apply_patch —
+  they're one operation, so one rule governs all three.
+- `match` — a glob. Read/edit/`*` use path-style globs (`*` is one path
+  segment, `**` spans directories); execute/network/mcp use shell-style
+  (`*` matches anything, trailing ` *` makes args optional). MCP patterns
+  match the full key `mcp_tool:{server}:{tool}`.
+- `effect` — `allow`, `ask`, or `deny`.
+- `tool` *(optional)* — narrow the rule to a single concrete tool name
+  (e.g. `"grep"`) instead of the whole op.
 
-Use `"*"` for the default action, `external_directory` for
-absolute-path rules outside the working directory, and `doom_loop`
-for repeated identical tool calls (default: `ask`). If `bash` is
-omitted, dirge installs its built-in safe bash allow/deny rules.
+Use `"*"` for the default action, `external_directory` (also a `rules`
+list, op defaults to `*`) for absolute-path rules outside the working
+directory, and `doom_loop` for the retry-loop hard-deny (set to `allow`
+to disable it). dirge always installs its built-in safe bash allow/deny
+rules and a read-only/memory/skill/in-cwd-write allow set beneath your
+rules; your `rules` override them.
 
-If `mcp_tool` is omitted, dirge defaults it to `ask` for ALL
-servers — MCP tools execute external code (the server's
-implementation, plus whatever filesystem / network / API effects it
-has), and silent default-allow let entire query sequences run before
-any prompt fired. To re-enable silent allow for a trusted server:
+MCP tools default to `ask` for ALL servers — they execute external code
+(the server's implementation, plus whatever filesystem / network / API
+effects it has), and silent default-allow let entire query sequences run
+before any prompt fired. To re-enable silent allow for a trusted server:
 
 ```json
 {
   "permission": {
-    "mcp_tool": {
-      "mcp_tool:lattice:*": "allow"
-    }
+    "rules": [
+      { "op": "mcp", "match": "mcp_tool:lattice:*", "effect": "allow" }
+    ]
   }
 }
 ```
@@ -207,10 +205,10 @@ Pair it with a tight `mcp_tool` rule for layered control, e.g.:
     }
   },
   "permission": {
-    "mcp_tool": {
-      "mcp_tool:semantic-index:*":          "allow",
-      "mcp_tool:semantic-index:write_file": "deny"
-    }
+    "rules": [
+      { "op": "mcp", "match": "mcp_tool:semantic-index:*",          "effect": "allow" },
+      { "op": "mcp", "match": "mcp_tool:semantic-index:write_file", "effect": "deny"  }
+    ]
   }
 }
 ```

@@ -590,6 +590,21 @@ fn push_segment<'a>(command: &'a str, start: usize, end: usize, out: &mut Vec<&'
 mod tests {
     use super::*;
 
+    /// Test helper: build a single op-based rule (tool-agnostic).
+    #[cfg(feature = "semantic-bash")]
+    fn rule(
+        op: crate::permission::OpSpec,
+        pattern: &str,
+        effect: crate::permission::Action,
+    ) -> crate::permission::RuleConfig {
+        crate::permission::RuleConfig {
+            op,
+            pattern: pattern.to_string(),
+            effect,
+            tool: None,
+        }
+    }
+
     /// F6: a timed-out `sleep 9999` (or any long-running command)
     /// must actually be killed when the timeout fires. Before this
     /// fix, dropping the tokio future left the bash child running
@@ -806,18 +821,15 @@ mod tests {
     #[tokio::test]
     async fn redirect_target_routes_through_write_rules() {
         use crate::permission::{
-            Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+            Action, OpSpec, PermissionConfig, SecurityMode, checker::PermissionChecker,
         };
-        use std::collections::HashMap;
 
-        // Configure write to deny everywhere; without an explicit
+        // Configure edit to deny everywhere; without an explicit
         // rule the M2/M4-pre default is still Allow, so we set an
         // explicit deny to make the test robust against the
         // default-flip.
-        let mut write_rules = HashMap::new();
-        write_rules.insert("/etc/**".to_string(), Action::Deny);
         let config = PermissionConfig {
-            write: Some(ToolPerm::Granular(write_rules)),
+            rules: vec![rule(OpSpec::Edit, "/etc/**", Action::Deny)],
             ..Default::default()
         };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
@@ -858,20 +870,17 @@ mod tests {
     #[tokio::test]
     async fn rm_arg_path_routes_through_write_rules() {
         use crate::permission::{
-            Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+            Action, OpSpec, PermissionConfig, SecurityMode, checker::PermissionChecker,
         };
-        use std::collections::HashMap;
 
-        // Permissive bash: allow `rm *`. Restrictive write: deny
-        // `/etc/**`. Without F1, the bash allow would let
+        // Permissive execute: allow `rm *`. Restrictive edit: deny
+        // `/etc/**`. Without F1, the execute allow would let
         // `rm /etc/passwd` through.
-        let mut bash_rules = HashMap::new();
-        bash_rules.insert("rm *".to_string(), Action::Allow);
-        let mut write_rules = HashMap::new();
-        write_rules.insert("/etc/**".to_string(), Action::Deny);
         let config = PermissionConfig {
-            bash: Some(ToolPerm::Granular(bash_rules)),
-            write: Some(ToolPerm::Granular(write_rules)),
+            rules: vec![
+                rule(OpSpec::Execute, "rm *", Action::Allow),
+                rule(OpSpec::Edit, "/etc/**", Action::Deny),
+            ],
             ..Default::default()
         };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
@@ -891,17 +900,14 @@ mod tests {
     #[tokio::test]
     async fn chmod_skips_mode_spec_routes_paths() {
         use crate::permission::{
-            Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+            Action, OpSpec, PermissionConfig, SecurityMode, checker::PermissionChecker,
         };
-        use std::collections::HashMap;
 
-        let mut bash_rules = HashMap::new();
-        bash_rules.insert("chmod *".to_string(), Action::Allow);
-        let mut write_rules = HashMap::new();
-        write_rules.insert("/etc/**".to_string(), Action::Deny);
         let config = PermissionConfig {
-            bash: Some(ToolPerm::Granular(bash_rules)),
-            write: Some(ToolPerm::Granular(write_rules)),
+            rules: vec![
+                rule(OpSpec::Execute, "chmod *", Action::Allow),
+                rule(OpSpec::Edit, "/etc/**", Action::Deny),
+            ],
             ..Default::default()
         };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
@@ -923,17 +929,14 @@ mod tests {
     #[tokio::test]
     async fn flags_skipped_when_extracting_paths() {
         use crate::permission::{
-            Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+            Action, OpSpec, PermissionConfig, SecurityMode, checker::PermissionChecker,
         };
-        use std::collections::HashMap;
 
-        let mut bash_rules = HashMap::new();
-        bash_rules.insert("rm *".to_string(), Action::Allow);
-        let mut write_rules = HashMap::new();
-        write_rules.insert("/etc/**".to_string(), Action::Deny);
         let config = PermissionConfig {
-            bash: Some(ToolPerm::Granular(bash_rules)),
-            write: Some(ToolPerm::Granular(write_rules)),
+            rules: vec![
+                rule(OpSpec::Execute, "rm *", Action::Allow),
+                rule(OpSpec::Edit, "/etc/**", Action::Deny),
+            ],
             ..Default::default()
         };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);
@@ -952,23 +955,14 @@ mod tests {
     #[tokio::test]
     async fn redirect_target_allowed_when_write_permits() {
         use crate::permission::{
-            Action, PermissionConfig, SecurityMode, ToolPerm, checker::PermissionChecker,
+            Action, OpSpec, PermissionConfig, SecurityMode, checker::PermissionChecker,
         };
-        use std::collections::HashMap;
 
-        // M4 (dirge-ojn): `write` no longer defaults to Allow; it
-        // falls to the new global Ask. F2 (dirge-jlj): write
-        // additionally consults `edit` rules. Install allow rules
-        // for BOTH so the combined check passes — matches the
-        // user-facing semantic that "write to X" requires write
-        // AND edit to permit it.
-        let mut write_rules = HashMap::new();
-        write_rules.insert("**".to_string(), Action::Allow);
-        let mut edit_rules = HashMap::new();
-        edit_rules.insert("**".to_string(), Action::Allow);
+        // F2 (dirge-jlj) dissolved: write/edit/apply_patch all map to
+        // Operation::Edit, so a single Edit allow rule governs the
+        // redirect-target write.
         let config = PermissionConfig {
-            write: Some(ToolPerm::Granular(write_rules)),
-            edit: Some(ToolPerm::Granular(edit_rules)),
+            rules: vec![rule(OpSpec::Edit, "**", Action::Allow)],
             ..Default::default()
         };
         let checker = PermissionChecker::new(&config, SecurityMode::Standard, None);

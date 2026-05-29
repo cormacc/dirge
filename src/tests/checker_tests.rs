@@ -1,5 +1,15 @@
 use crate::permission::checker::{CheckResult, PermissionChecker};
-use crate::permission::{Action, PermissionConfig, SecurityMode, ToolPerm};
+use crate::permission::{Action, OpSpec, PermissionConfig, RuleConfig, SecurityMode};
+
+/// Concise config-rule constructor for tests.
+fn rule(op: OpSpec, m: &str, effect: Action) -> RuleConfig {
+    RuleConfig {
+        op,
+        pattern: m.to_string(),
+        effect,
+        tool: None,
+    }
+}
 
 fn make_checker(mode: SecurityMode) -> PermissionChecker {
     PermissionChecker::new(
@@ -39,7 +49,7 @@ fn standard_asks_unknown_tool_with_default() {
 #[test]
 fn accept_auto_allows_inside_working_dir() {
     let config = PermissionConfig {
-        write: Some(ToolPerm::Simple(Action::Ask)),
+        rules: vec![rule(OpSpec::Edit, "**", Action::Ask)],
         ..PermissionConfig::default()
     };
     let mut checker = PermissionChecker::new(
@@ -255,7 +265,7 @@ fn relative_path_escaping_cwd_is_external() {
     // semantics apply: in-tree write is Ask→Allow under Accept,
     // external write is Ask (no ext_dir rule installed).
     let config = PermissionConfig {
-        write: Some(ToolPerm::Simple(Action::Ask)),
+        rules: vec![rule(OpSpec::Edit, "**", Action::Ask)],
         ..PermissionConfig::default()
     };
     let mut checker = PermissionChecker::new(&config, SecurityMode::Accept, Some(cwd.clone()));
@@ -433,13 +443,10 @@ fn session_allowlist_relative_pattern_matches_absolute_check_inside_cwd() {
 #[test]
 fn explicit_granular_rules_take_effect() {
     let config = PermissionConfig {
-        read: Some(ToolPerm::Granular(
-            [
-                ("*.md".to_string(), Action::Allow),
-                ("*.rs".to_string(), Action::Ask),
-            ]
-            .into(),
-        )),
+        rules: vec![
+            rule(OpSpec::Read, "*.md", Action::Allow),
+            rule(OpSpec::Read, "*.rs", Action::Ask),
+        ],
         ..PermissionConfig::default()
     };
     let mut checker = PermissionChecker::new(&config, SecurityMode::Standard, None);

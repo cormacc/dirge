@@ -1,5 +1,15 @@
 use super::*;
-use crate::permission::{Action, PermissionConfig};
+use crate::permission::{Action, OpSpec, PermissionConfig, RuleConfig};
+
+/// Concise config-rule constructor for tests.
+fn rule(op: OpSpec, m: &str, effect: Action) -> RuleConfig {
+    RuleConfig {
+        op,
+        pattern: m.to_string(),
+        effect,
+        tool: None,
+    }
+}
 
 fn fresh_checker() -> PermissionChecker {
     PermissionChecker::new(
@@ -135,13 +145,8 @@ fn f2_edit_alias_check_path_directly_for_write_and_apply_patch() {
     // `tools::enforce`. But pin that the checker's `edit`
     // rules behave as the user expects when consulted with
     // the edit tool name.
-    use crate::permission::ToolPerm;
-    use std::collections::HashMap;
-
-    let mut edit_rules = HashMap::new();
-    edit_rules.insert("**".to_string(), Action::Deny);
     let config = PermissionConfig {
-        edit: Some(ToolPerm::Granular(edit_rules)),
+        rules: vec![rule(OpSpec::Edit, "**", Action::Deny)],
         ..Default::default()
     };
 
@@ -216,13 +221,8 @@ fn write_inside_cwd_allowed_outside_cwd_asks() {
 /// CWD-allow installer specifically.
 #[test]
 fn user_write_deny_overrides_cwd_builtin_allow() {
-    use crate::permission::ToolPerm;
-    use std::collections::HashMap;
-
-    let mut write_rules = HashMap::new();
-    write_rules.insert("/tmp/proj/build/**".to_string(), Action::Deny);
     let config = PermissionConfig {
-        write: Some(ToolPerm::Granular(write_rules)),
+        rules: vec![rule(OpSpec::Edit, "/tmp/proj/build/**", Action::Deny)],
         ..Default::default()
     };
 
@@ -356,13 +356,8 @@ fn cwd_allow_refuses_paths_with_glob_metachars() {
 /// Explicit user rules override the M4 builtin-allow list.
 #[test]
 fn m4_user_rule_overrides_builtin_allow() {
-    use crate::permission::ToolPerm;
-    use std::collections::HashMap;
-
-    let mut read_rules = HashMap::new();
-    read_rules.insert("/etc/**".to_string(), Action::Deny);
     let config = PermissionConfig {
-        read: Some(ToolPerm::Granular(read_rules)),
+        rules: vec![rule(OpSpec::Read, "/etc/**", Action::Deny)],
         ..Default::default()
     };
 
@@ -384,36 +379,23 @@ fn m4_user_rule_overrides_builtin_allow() {
     ));
 }
 
-/// M2 (dirge-cep): the unified `tools` map at the top of
-/// `PermissionConfig` lets rules be declared for ANY tool name
-/// (including ones dirge doesn't ship per-tool struct fields
-/// for — plugin-registered tools, future tools). Pin three
-/// invariants:
-///   1. A rule in `tools` for a tool name with no legacy field
-///      is honored.
-///   2. A rule in `tools` for a tool name that ALSO has a
-///      legacy field overrides the legacy field (explicit
-///      newer shape wins).
-///   3. The `Simple(action)` shape (string shorthand for
-///      `{"*": action}`) works in the map.
+/// Op-based rules govern any tool, including ones with no dedicated
+/// handling (a plugin tool → `Operation::Other`) and network tools.
+/// Last-match-wins, and the op selects which calls a rule covers.
 #[test]
-fn tools_map_unified_schema_honored_and_overrides_legacy() {
-    use crate::permission::{PermissionConfig, ToolPerm};
-    use std::collections::HashMap;
-
-    // Tool with no legacy field — only reachable via `tools`.
-    let mut tools_map = HashMap::new();
-    let mut plugin_rules = HashMap::new();
-    plugin_rules.insert("dangerous".to_string(), Action::Deny);
-    tools_map.insert("plugin_xyz".to_string(), ToolPerm::Granular(plugin_rules));
-
-    // Tool with a legacy field — map version should win.
-    tools_map.insert("websearch".to_string(), ToolPerm::Simple(Action::Deny));
-
+fn op_rules_govern_arbitrary_and_network_tools() {
     let config = PermissionConfig {
-        // Legacy field says Allow…
-        websearch: Some(ToolPerm::Simple(Action::Allow)),
-        tools: Some(tools_map),
+        rules: vec![
+            // A network rule denying websearch.
+            rule(OpSpec::Network, "**", Action::Deny),
+            // A catch-all denying the unknown plugin tool's input.
+            RuleConfig {
+                op: OpSpec::Any,
+                pattern: "dangerous".to_string(),
+                effect: Action::Deny,
+                tool: Some("plugin_xyz".to_string()),
+            },
+        ],
         ..Default::default()
     };
 
@@ -423,13 +405,12 @@ fn tools_map_unified_schema_honored_and_overrides_legacy() {
         Some(std::path::PathBuf::from("/tmp")),
     );
 
-    // (1) tools-only entry honored.
+    // Unknown plugin tool, narrowed by `tool`.
     assert!(matches!(
         checker.check("plugin_xyz", "dangerous"),
         CheckResult::Denied(_)
     ));
-
-    // (2) tools map overrides legacy field.
+    // Network op rule governs websearch.
     assert!(matches!(
         checker.check("websearch", "anything"),
         CheckResult::Denied(_)
@@ -530,13 +511,12 @@ fn accept_mode_does_not_coerce_mcp_to_allow() {
 /// configs) still gets the Accept-mode allow.
 #[test]
 fn accept_mode_still_coerces_safe_non_path_tools() {
-    use std::collections::HashMap;
-    let mut config = PermissionConfig::default();
-    // Set question to Ask explicitly so Accept's coercion path
-    // is exercised.
-    let mut q_map: HashMap<String, Action> = HashMap::new();
-    q_map.insert("*".to_string(), Action::Ask);
-    config.question = Some(crate::permission::ToolPerm::Granular(q_map));
+    // Set question (a Meta op) to Ask explicitly so Accept's
+    // coercion path is exercised.
+    let config = PermissionConfig {
+        rules: vec![rule(OpSpec::Meta, "*", Action::Ask)],
+        ..Default::default()
+    };
     let mut checker = PermissionChecker::new(
         &config,
         SecurityMode::Accept,
@@ -554,11 +534,10 @@ fn accept_mode_still_coerces_safe_non_path_tools() {
 /// control — the default-Ask only fires when no rule exists.
 #[test]
 fn mcp_tool_explicit_config_overrides_default_ask() {
-    use std::collections::HashMap;
-    let mut config = PermissionConfig::default();
-    let mut granular = HashMap::new();
-    granular.insert("mcp_tool:lattice:*".to_string(), Action::Allow);
-    config.mcp_tool = Some(crate::permission::ToolPerm::Granular(granular));
+    let config = PermissionConfig {
+        rules: vec![rule(OpSpec::Mcp, "mcp_tool:lattice:*", Action::Allow)],
+        ..Default::default()
+    };
     let mut checker = PermissionChecker::new(
         &config,
         SecurityMode::Standard,

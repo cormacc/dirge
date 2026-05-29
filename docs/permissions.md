@@ -89,29 +89,41 @@ config rule (precedence 4) always overrides them.
 
 ## Configuration
 
-Permissions are configured under the `permission` key. Per-tool rules
-map a glob pattern to an effect; a bare action is shorthand for "all":
+Permissions are configured under the `permission` key. `rules` is an
+**ordered list**; each rule names the operation it governs (`op`), a glob
+to `match`, and the `effect`. Reading top-to-bottom, **last match wins**:
 
 ```jsonc
 {
   "permission": {
-    "*": "ask",                              // default for anything unmatched
-    "bash": { "cargo *": "allow",            // last match wins within a tool
-              "git push *": "deny" },
-    "edit": { "/etc/**": "deny" },           // governs write + edit + apply_patch
-    "external_directory": { "/shared/**": "allow" }
+    "*": "ask",                                          // default for anything unmatched
+    "rules": [
+      { "op": "execute", "match": "cargo *",   "effect": "allow" },
+      { "op": "execute", "match": "git push *", "effect": "deny"  },
+      { "op": "edit",    "match": "/etc/**",   "effect": "deny"  }  // governs write + edit + apply_patch
+    ],
+    "external_directory": [
+      { "match": "/shared/**", "effect": "allow" }
+    ]
   }
 }
 ```
 
-- **`edit` covers write/edit/apply_patch** — they're one operation, so
-  one rule governs all three.
-- **Glob semantics:** path tools use path-style globs (`*` is one path
-  segment, `**` spans directories); command tools use shell-style (`*`
-  matches anything, trailing ` *` makes args optional).
-- **Last-match-wins** within a tool's rules — order them general → specific.
-- `external_directory` rules govern mutating access to paths outside the
-  project root.
+- **`op` is the operation class, not a tool name.** Values: `read`,
+  `edit`, `execute`, `network`, `mcp`, `memory`, `skill`, `agent`,
+  `meta`, or `*` (any). `edit` covers write/edit/apply_patch — they're
+  one operation, so one rule governs all three.
+- **Narrow to a tool** with an optional `"tool": "<name>"` field when a
+  rule should apply to a single concrete tool rather than the whole op.
+- **Glob semantics** are inferred from the op: read/edit/`*` use
+  path-style globs (`*` is one path segment, `**` spans directories);
+  execute/network/mcp use shell-style (`*` matches anything, trailing
+  ` *` makes args optional).
+- **Last-match-wins** across the ordered `rules` list — put general
+  rules first, specific overrides last.
+- `external_directory` is itself a `rules` list (op defaults to `*`)
+  governing access to paths outside the project root.
+- Set `"doom_loop": "allow"` to disable the retry-loop hard-deny.
 
 ### Security modes
 
