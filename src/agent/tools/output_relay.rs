@@ -307,6 +307,11 @@ pub fn relay_if_large(tool: &str, output: String, header_note: &str) -> RelayOut
 mod tests {
     use super::*;
 
+    /// Serializes tests that read or mutate the shared `BASH_INLINE_MAX`
+    /// global so a transient override in one test can't be observed
+    /// mid-computation by another running in parallel (dirge-zk60).
+    static THRESHOLD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Short output (well under both byte + line thresholds)
     /// passes through unchanged.
     #[test]
@@ -434,6 +439,7 @@ mod tests {
     /// summary block.
     #[test]
     fn relay_prepends_header_note() {
+        let _guard = THRESHOLD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let payload: String = "x".repeat(inline_max_bytes_for("bash") + 1);
         let outcome = relay_if_large("bash", payload, "Exit code: 137");
         assert!(outcome.text.starts_with("Exit code: 137"));
@@ -446,6 +452,7 @@ mod tests {
     /// makes shorter outputs trip the relay.
     #[test]
     fn config_override_changes_threshold() {
+        let _guard = THRESHOLD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Snapshot whatever the global was so we can restore
         // it for other parallel tests.
         let prev = BASH_INLINE_MAX.load(Ordering::Relaxed);

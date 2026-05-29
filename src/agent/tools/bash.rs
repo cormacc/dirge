@@ -421,15 +421,20 @@ async fn check_bash_segments(
                 crate::permission::engine::classify_path(p, &working_dir),
             )
         };
-        let (segments_with_flag, complex) = bash::parse_bash_segments_with_dev_null(command)
-            .unwrap_or_else(|_| (vec![(command.to_string(), false)], false));
+        // /dev/null detection lives solely in `classify_path` (the Path
+        // resource's `dev_null` field, consulted by BuiltinAllow) — so
+        // we just split into plain segments here. The old
+        // `parse_bash_segments_with_dev_null` computed a parallel
+        // per-segment flag that was discarded (dirge-v0b6).
+        let (segments, complex) = bash::parse_bash_segments_full(command)
+            .unwrap_or_else(|_| (vec![command.to_string()], false));
         if complex {
             // Subshell / command substitution / etc.: tree-sitter
             // declined to split — check the whole command as one
             // Execute claim so the user confirms the unfamiliar shape.
             claims.push(cmd_claim(command));
         } else {
-            for (segment, _dev_null) in &segments_with_flag {
+            for segment in &segments {
                 claims.push(cmd_claim(segment));
             }
         }

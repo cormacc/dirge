@@ -21,6 +21,15 @@ pub(crate) fn canonicalize_for_cache(working_dir: &str) -> String {
         .unwrap_or_else(|| working_dir.to_string())
 }
 
+/// Best-effort canonicalize a `Path`, falling back to the path itself
+/// when it can't be resolved (doesn't exist on disk, permission error).
+/// The `PathBuf` analogue of [`canonicalize_for_cache`] and the single
+/// home for the `path.canonicalize().unwrap_or_else(|_| path.into())`
+/// idiom that was copy-pasted with varied fallbacks (dirge-b2g7).
+pub fn canonical_or_self(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 pub(crate) fn resolve_absolute(path: &str, working_dir: &str) -> String {
     let p = Path::new(path);
     let joined = if p.is_absolute() {

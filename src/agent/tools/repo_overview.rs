@@ -122,7 +122,7 @@ impl Tool for RepoOverviewTool {
             return Err(ToolError::Msg(format!("path is not a directory: {}", path)));
         }
 
-        let canonical_root = root.canonicalize().unwrap_or(root.clone());
+        let canonical_root = crate::permission::path::canonical_or_self(&root);
         let result = build_overview(&canonical_root, depth, want_lines)?;
 
         if let Some(ref cache) = self.cache {

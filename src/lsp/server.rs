@@ -40,9 +40,9 @@ pub fn nearest_root(
     exclude_markers: &[&str],
 ) -> Option<PathBuf> {
     let start = file.parent().unwrap_or(Path::new("."));
-    let stop_at = stop_at.canonicalize().unwrap_or_else(|_| stop_at.into());
+    let stop_at = crate::permission::path::canonical_or_self(stop_at);
 
-    let mut cursor = start.canonicalize().unwrap_or_else(|_| start.into());
+    let mut cursor = crate::permission::path::canonical_or_self(start);
     // EXT-7: assert file is a descendant of stop_at BEFORE walking.
     // If the file lives outside the worktree (e.g. a symlink to /etc),
     // the loop would walk past stop_at all the way to `/`, picking
@@ -86,7 +86,7 @@ pub fn nearest_root(
 /// rust-analyzer users report mis-detection.
 pub fn rust_workspace_root(file: &Path, stop_at: &Path) -> Option<PathBuf> {
     let crate_root = nearest_root(file, stop_at, &["Cargo.toml"], &[])?;
-    let stop_at_canon = stop_at.canonicalize().unwrap_or_else(|_| stop_at.into());
+    let stop_at_canon = crate::permission::path::canonical_or_self(stop_at);
 
     let mut cursor = crate_root.clone();
     loop {
