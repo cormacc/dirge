@@ -130,14 +130,14 @@ Ollama, and any custom OpenAI-compatible endpoint.
 Providers are declared once in `$XDG_CONFIG_HOME/dirge/config.json` and
 referenced by alias from role-assignment keys (`provider`, `review_provider`,
 `escalation_provider`, `summarization_provider`, `subagent_provider`) — so each
-role can run on a different model. See [CONFIG.md](CONFIG.md) for the schema,
+role can run on a different model. See [docs/config.md](docs/config.md) for the schema,
 provider aliases, role-assignment table, permission rules, and MCP setup.
 
 ## Documentation
 
 | Document | Topic |
 |---|---|
-| [CONFIG.md](CONFIG.md) | Config file location, keys, provider aliases, permission rules, MCP servers |
+| [docs/config.md](docs/config.md) | Config file location, keys, provider aliases, permission rules, MCP servers |
 | [docs/features.md](docs/features.md) | Full feature catalog, robust agent loop, performance |
 | [docs/permissions.md](docs/permissions.md) | Authorization engine, security modes, `/why` |
 | [docs/prompts.md](docs/prompts.md) | Prompts system, per-prompt tool restrictions, context files |

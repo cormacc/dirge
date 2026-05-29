@@ -448,7 +448,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         });
 
         // Web tools: gated on config + an env-var escape hatch.
-        // CONFIG.md documents both keys as defaulting to `true`;
+        // docs/config.md documents both keys as defaulting to `true`;
         // explicit `false` in config disables. The env vars are
         // symmetric — previously only `WEBSEARCH_ENABLED` existed,
         // forcing webfetch users to edit config.json for an

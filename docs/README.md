@@ -2,10 +2,11 @@
 
 Feature-by-feature documentation for dirge. For installation, quick
 start, and feature overview, see the top-level [README](../README.md).
-For configuration keys and provider setup, see [CONFIG.md](../CONFIG.md).
+For configuration keys and provider setup, see [config.md](config.md).
 
 | Document | Topic |
 |---|---|
+| [config.md](config.md) | Config file location, keys, provider aliases + roles, permission rules, MCP/LSP/ACP servers |
 | [features.md](features.md) | Full feature catalog — core capabilities, the robust agent loop, performance |
 | [permissions.md](permissions.md) | Authorization engine — the single decision point, operations/claims, policy precedence, sane defaults, config, security modes, `/why` |
 | [prompts.md](prompts.md) | Prompts system — built-in prompts, per-prompt `deny_tools` restrictions, custom prompts, context files |

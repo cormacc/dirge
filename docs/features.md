@@ -5,7 +5,7 @@ headline differentiators, see the top-level [README](../README.md).
 
 ## Core
 
-- **Multi-provider**: OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, GLM, Ollama, plus custom OpenAI-compatible endpoints. A single `providers` map declares aliases; top-level role keys (`provider`, `review_provider`, `escalation_provider`, `summarization_provider`, `subagent_provider`) point each role at one of those aliases. See [CONFIG.md](../CONFIG.md).
+- **Multi-provider**: OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, GLM, Ollama, plus custom OpenAI-compatible endpoints. A single `providers` map declares aliases; top-level role keys (`provider`, `review_provider`, `escalation_provider`, `summarization_provider`, `subagent_provider`) point each role at one of those aliases. See [config.md](config.md).
 - **Standard tools**: read, write, edit, bash, grep, find_files, glob, list_dir, write_todo_list, apply_patch, repo_overview, session_search, webfetch, websearch, question, memory, skill, task, task_status, tool_search.
 - **Line-numbered read output**: `read` prefixes each line with right-aligned line numbers (`123: content`).
 - **Environment-aware**: system prompt includes OS, shell, working directory, and git branch for context.

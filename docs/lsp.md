@@ -31,7 +31,7 @@ discovering it later via `cargo check`.
 
 Missing binaries trip the broken-server backoff (1s → 2s → … capped at 10 min)
 rather than failing dirge — the rest of the session keeps working. Override the
-spawn command per server via the `lsp` config key; see [CONFIG.md](../CONFIG.md).
+spawn command per server via the `lsp` config key; see [config.md](config.md).
 
 ## Workspace root resolution
 
@@ -46,4 +46,4 @@ follows `Gemfile`/`Rakefile`; bash-language-server uses the file's parent.
 
 Disable: `--no-lsp` flag or `{ "lsp": false }` in the config. Per-server
 overrides (custom command, env, init options) live in the config — see
-[CONFIG.md](../CONFIG.md).
+[config.md](config.md).
