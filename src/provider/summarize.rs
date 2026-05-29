@@ -136,64 +136,51 @@ where
     M: rig::completion::CompletionModel + Clone + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
 {
-    use crate::agent::recovery::{self, RecoveryPolicy};
+    use crate::agent::recovery::{RecoveryPolicy, run_with_retry};
     let policy = RecoveryPolicy::default();
-    let mut attempts: usize = 0;
-    loop {
-        let agent = rig::agent::AgentBuilder::new(model.clone())
-            .preamble("You are a conversation summarizer.")
-            .build();
 
-        let mut stream = agent
-            .stream_chat(prompt.clone(), Vec::<rig::completion::Message>::new())
-            .multi_turn(1)
-            .await;
+    // The attempt/classify/backoff/sleep loop lives in `run_with_retry`
+    // (dirge-6cvc). The closure builds + drains one stream and returns a
+    // stream error as `Err(String)` so the helper can classify it; an
+    // empty-but-clean response is returned as `Ok(String::new())` and
+    // rejected (non-retryable) below.
+    let response = run_with_retry(&policy, "summarizer", || {
+        let model = model.clone();
+        let prompt = prompt.clone();
+        async move {
+            let agent = rig::agent::AgentBuilder::new(model)
+                .preamble("You are a conversation summarizer.")
+                .build();
 
-        let mut response = String::new();
-        let mut error: Option<String> = None;
-        use futures::StreamExt;
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig::streaming::StreamedAssistantContent::Text(text),
-                )) => response.push_str(&text.text),
-                Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
-                    response = res.response().to_string();
-                    break;
+            let mut stream = agent
+                .stream_chat(prompt, Vec::<rig::completion::Message>::new())
+                .multi_turn(1)
+                .await;
+
+            let mut response = String::new();
+            use futures::StreamExt;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                        rig::streaming::StreamedAssistantContent::Text(text),
+                    )) => response.push_str(&text.text),
+                    Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
+                        return Ok(res.response().to_string());
+                    }
+                    Err(e) => return Err(e.to_string()),
+                    _ => {}
                 }
-                Err(e) => {
-                    error = Some(e.to_string());
-                    break;
-                }
-                _ => {}
             }
+            Ok(response)
         }
+    })
+    .await
+    .map_err(|msg| anyhow::anyhow!("Compression failed: {msg}"))?;
 
-        if let Some(msg) = error {
-            let kind = recovery::classify_error(&msg);
-            if policy.should_retry(attempts, kind) {
-                let delay = policy.backoff_duration_for_msg(attempts, &msg);
-                tracing::info!(
-                    "summarizer retry {}/{} after {:?} ({:?}): {}",
-                    attempts + 1,
-                    policy.max_retries(),
-                    delay,
-                    kind,
-                    msg
-                );
-                tokio::time::sleep(delay).await;
-                attempts += 1;
-                continue;
-            }
-            return Err(anyhow::anyhow!("Compression failed: {}", msg));
-        }
-
-        if response.is_empty() {
-            anyhow::bail!("Compression returned empty response");
-        }
-
-        return Ok(response);
+    if response.is_empty() {
+        anyhow::bail!("Compression returned empty response");
     }
+    Ok(response)
 }
 
 #[cfg(test)]

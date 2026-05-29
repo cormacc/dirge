@@ -585,36 +585,23 @@ impl AnyModel {
         // (`task` tool) call with no retry. Network + rate-limit
         // failures now get the standard 3-retry exponential backoff;
         // auth / context-length / other still bail immediately.
-        use crate::agent::recovery::{RecoveryPolicy, classify_error};
+        use crate::agent::recovery::{RecoveryPolicy, run_with_retry};
         let policy = RecoveryPolicy::default();
+        // The retry/backoff loop lives in `run_with_retry` (dirge-6cvc);
+        // the macro only exists to dispatch over `AnyModel`'s concrete
+        // per-variant model type (each `$m` has a different type).
         macro_rules! one_shot {
             ($m:expr) => {{
-                let m = $m;
-                let mut attempts = 0;
-                loop {
+                let m = $m.clone();
+                run_with_retry(&policy, "btw_query", || {
                     let agent = rig::agent::AgentBuilder::new(m.clone())
                         .preamble(preamble)
                         .build();
-                    match agent.prompt(prompt.clone()).await {
-                        Ok(reply) => break Ok::<String, anyhow::Error>(reply),
-                        Err(e) => {
-                            let msg = e.to_string();
-                            let kind = classify_error(&msg);
-                            if !policy.should_retry(attempts, kind) {
-                                break Err(e.into());
-                            }
-                            let delay = policy.backoff_duration_for_msg(attempts, &msg);
-                            tracing::warn!(
-                                attempt = attempts + 1,
-                                delay_ms = delay.as_millis() as u64,
-                                error = %msg,
-                                "btw_query retrying",
-                            );
-                            tokio::time::sleep(delay).await;
-                            attempts += 1;
-                        }
-                    }
-                }
+                    let prompt = prompt.clone();
+                    async move { agent.prompt(prompt).await }
+                })
+                .await
+                .map_err(anyhow::Error::from)
             }};
         }
         match self {
