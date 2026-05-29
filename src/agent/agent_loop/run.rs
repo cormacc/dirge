@@ -169,18 +169,52 @@ fn transcript_from_value_slice(messages: &[serde_json::Value]) -> String {
     out
 }
 
+/// Consecutive summarizer failures (per run) before the compaction
+/// circuit breaker opens and the LLM summarizer is skipped for the rest
+/// of the run — the cheap `prune_tool_outputs` pass still runs, so
+/// context can't grow unbounded. 3 tolerates two transient failures; a
+/// third means the summarizer is systematically broken and retrying it
+/// every fold just wastes API calls (IMPROVEMENTS_PLAN #1).
+const MAX_CONSECUTIVE_COMPACTION_FAILURES: u32 = 3;
+
+/// What the LLM-summary stage of a compaction pass did, so `run_loop`
+/// can drive the circuit-breaker counter. (The cheap prune always runs
+/// regardless of this outcome.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryOutcome {
+    /// A valid summary was produced (LLM or plugin) and applied.
+    Succeeded,
+    /// The summarizer ran but returned an error or an invalid summary.
+    Failed,
+    /// The summarizer was not run: none wired, breaker open, or no
+    /// foldable middle. Not a failure — doesn't trip the breaker.
+    Skipped,
+}
+
+/// Fold a compaction pass outcome into the per-run failure counter:
+/// reset on success, increment on failure, leave untouched on skip.
+fn record_compaction_outcome(failures: &mut u32, outcome: SummaryOutcome) {
+    match outcome {
+        SummaryOutcome::Succeeded => *failures = 0,
+        SummaryOutcome::Failed => *failures = failures.saturating_add(1),
+        SummaryOutcome::Skipped => {}
+    }
+}
+
 async fn run_compaction_pass(
     current_context: &mut Context,
     summarize_fn: &Option<crate::agent::compression::SummarizeFn>,
     protect_tail: usize,
+    compaction_failures: u32,
     memory_provider: &Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
     compaction_hooks: Option<&crate::agent::agent_loop::types::CompactionHooks>,
     emit: &mpsc::Sender<LoopEvent>,
-) {
+) -> SummaryOutcome {
     run_compaction_pass_with_focus(
         current_context,
         summarize_fn,
         protect_tail,
+        compaction_failures,
         None,
         memory_provider,
         compaction_hooks,
@@ -204,11 +238,12 @@ async fn run_compaction_pass_with_focus(
     current_context: &mut Context,
     summarize_fn: &Option<crate::agent::compression::SummarizeFn>,
     protect_tail: usize,
+    compaction_failures: u32,
     focus_topic: Option<String>,
     memory_provider: &Option<std::sync::Arc<dyn crate::extras::memory_provider::MemoryProvider>>,
     compaction_hooks: Option<&crate::agent::agent_loop::types::CompactionHooks>,
     emit: &mpsc::Sender<LoopEvent>,
-) {
+) -> SummaryOutcome {
     use crate::agent::compression;
 
     let before = compression::estimate_messages_tokens(&current_context.messages);
@@ -236,7 +271,20 @@ async fn run_compaction_pass_with_focus(
     // their content in place. compress_reporting handles that
     // gracefully (zero-width fold).
     let mut applied_first_kept = current_context.messages.len();
-    if let Some(sfn) = summarize_fn {
+    // Drives the per-run circuit breaker: Skipped unless the summarizer
+    // actually runs and resolves to a valid summary (Succeeded) or an
+    // error / invalid summary (Failed).
+    let mut outcome = SummaryOutcome::Skipped;
+    if compaction_failures >= MAX_CONSECUTIVE_COMPACTION_FAILURES {
+        // Circuit breaker open: the summarizer has failed too many times
+        // this run. Skip the LLM call entirely and keep the pruned
+        // context (IMPROVEMENTS_PLAN #1).
+        tracing::warn!(
+            target: "dirge::agent_loop",
+            failures = compaction_failures,
+            "compaction summarizer failed {compaction_failures} consecutive times — circuit breaker open, skipping LLM summarization",
+        );
+    } else if let Some(sfn) = summarize_fn {
         let (start, end) = compression::compute_compress_window(
             &current_context.messages,
             compression::PROTECT_HEAD_DEFAULT,
@@ -295,12 +343,14 @@ async fn run_compaction_pass_with_focus(
                     // is therefore `start` — anything below was
                     // protected, anything above was folded.
                     applied_first_kept = start;
+                    outcome = SummaryOutcome::Succeeded;
                 }
                 Ok(_) => {
                     tracing::warn!(
                         target: "dirge::agent_loop",
                         "compaction summarizer returned an unvalidated summary — keeping pruned context",
                     );
+                    outcome = SummaryOutcome::Failed;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -308,6 +358,7 @@ async fn run_compaction_pass_with_focus(
                         error = %e,
                         "compaction summarizer failed — keeping pruned context",
                     );
+                    outcome = SummaryOutcome::Failed;
                 }
             }
         }
@@ -323,6 +374,8 @@ async fn run_compaction_pass_with_focus(
             first_kept_index: applied_first_kept,
         })
         .await;
+
+    outcome
 }
 
 /// Public entry point: start a new run from one or more prompt
@@ -435,6 +488,12 @@ pub async fn run_loop(
     // Reset each new user turn; set true when a fold happens.
     let mut folded_this_turn: bool;
 
+    // Circuit breaker: consecutive summarizer failures this run. After
+    // MAX_CONSECUTIVE_COMPACTION_FAILURES, compaction skips the LLM
+    // summarizer (cheap pruning still runs). Per-run — a fresh run_loop
+    // starts at 0 (IMPROVEMENTS_PLAN #1).
+    let mut compaction_failures: u32 = 0;
+
     // Pi line 167: initial steering poll.
     // Phase 4 part 2: composes with the file-touch tracker's
     // reminder poll when configured.
@@ -502,15 +561,17 @@ pub async fn run_loop(
                         "context-manager: turn-start fold firing ({}% of context)",
                         (estimate.ratio * 100.0) as u32,
                     );
-                    run_compaction_pass(
+                    let outcome = run_compaction_pass(
                         &mut current_context,
                         &summarize_fn,
                         5, // protect last 5 messages
+                        compaction_failures,
                         &memory_provider,
                         config.compaction_hooks.as_ref(),
                         emit,
                     )
                     .await;
+                    record_compaction_outcome(&mut compaction_failures, outcome);
                     folded_this_turn = true;
                 }
             }
@@ -823,15 +884,17 @@ pub async fn run_loop(
                         if let Some(prompt_tokens) = token_usage.map(|u| u.input_tokens)
                             && crate::agent::compression::should_compress(prompt_tokens, ctx_max)
                         {
-                            run_compaction_pass(
+                            let outcome = run_compaction_pass(
                                 &mut current_context,
                                 &summarize_fn,
                                 5, // protect last 5 messages
+                                compaction_failures,
                                 &memory_provider,
                                 config.compaction_hooks.as_ref(),
                                 emit,
                             )
                             .await;
+                            record_compaction_outcome(&mut compaction_failures, outcome);
                         }
                     }
                     PostUsageDecisionKind::ExitWithSummary => {
@@ -843,15 +906,17 @@ pub async fn run_loop(
                         // When context is critically over the threshold,
                         // prune aggressively then run the structured-summary
                         // pass if a summarizer is wired.
-                        run_compaction_pass(
+                        let outcome = run_compaction_pass(
                             &mut current_context,
                             &summarize_fn,
                             3, // protect only last 3
+                            compaction_failures,
                             &memory_provider,
                             config.compaction_hooks.as_ref(),
                             emit,
                         )
                         .await;
+                        record_compaction_outcome(&mut compaction_failures, outcome);
                     }
                     _ => {}
                 }

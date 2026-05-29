@@ -152,7 +152,7 @@ async fn run_compaction_pass_inserts_summary_and_rotates_session() {
         }));
 
     let (tx, mut rx) = mpsc::channel::<LoopEvent>(8);
-    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, None, &tx).await;
+    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, 0, &None, None, &tx).await;
     drop(tx);
 
     // (a) older messages dropped.
@@ -250,7 +250,7 @@ async fn compaction_on_compact_hook_overrides_llm_summary() {
     };
 
     let (tx, _rx) = mpsc::channel::<LoopEvent>(8);
-    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, Some(&hooks), &tx).await;
+    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, 0, &None, Some(&hooks), &tx).await;
     drop(tx);
 
     // on-before-compact observed the fold.
@@ -329,7 +329,7 @@ async fn compaction_invalid_plugin_summary_falls_through_to_llm() {
     };
 
     let (tx, _rx) = mpsc::channel::<LoopEvent>(8);
-    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, &None, Some(&hooks), &tx).await;
+    super::run_compaction_pass(&mut ctx, &summarize_fn, 5, 0, &None, Some(&hooks), &tx).await;
     drop(tx);
 
     assert_eq!(
@@ -371,7 +371,7 @@ async fn run_compaction_pass_without_summarizer_prunes_only() {
     // Use protect_tail = 2 so the large tool result is eligible
     // for pruning (it's at index 1, end = 4 - 2 = 2, so index
     // 1 is in-range).
-    super::run_compaction_pass(&mut ctx, &None, 2, &None, None, &tx).await;
+    super::run_compaction_pass(&mut ctx, &None, 2, 0, &None, None, &tx).await;
     drop(tx);
 
     // No SUMMARY_PREFIX message inserted.
@@ -2127,5 +2127,105 @@ async fn dirge_el3n_proactive_fold_does_not_fire_under_threshold() {
     assert!(
         total >= 4_000,
         "under-threshold ratio must not trigger fold; saw {total} chars (input was 4000)",
+    );
+}
+
+// IMPROVEMENTS_PLAN #1: the compaction circuit breaker. After
+// MAX_CONSECUTIVE_COMPACTION_FAILURES failures the LLM summarizer is no
+// longer invoked (cheap pruning still runs).
+#[test]
+fn record_compaction_outcome_drives_counter() {
+    let mut f = 0u32;
+    super::record_compaction_outcome(&mut f, super::SummaryOutcome::Failed);
+    assert_eq!(f, 1);
+    super::record_compaction_outcome(&mut f, super::SummaryOutcome::Failed);
+    assert_eq!(f, 2);
+    super::record_compaction_outcome(&mut f, super::SummaryOutcome::Skipped);
+    assert_eq!(f, 2, "skip must not change the counter");
+    super::record_compaction_outcome(&mut f, super::SummaryOutcome::Succeeded);
+    assert_eq!(f, 0, "success resets the counter");
+}
+
+#[tokio::test]
+async fn compaction_circuit_breaker_skips_summarizer_after_max_failures() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let calls_inner = calls.clone();
+    // Summarizer that always fails — and counts its invocations.
+    let summarize_fn: Option<crate::agent::compression::SummarizeFn> =
+        Some(std::sync::Arc::new(move |_prompt: String| {
+            let c = calls_inner.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("summarizer boom"))
+            })
+        }));
+
+    let make_ctx = || {
+        let mut ctx = empty_context();
+        ctx.messages
+            .push(serde_json::json!({"role":"system","content":"agent"}));
+        ctx.messages
+            .push(serde_json::json!({"role":"user","content":"task"}));
+        for i in 0..20 {
+            let role = if i % 2 == 0 { "assistant" } else { "user" };
+            ctx.messages.push(serde_json::json!({
+                "role": role, "content": format!("turn {i} with filler content")
+            }));
+        }
+        ctx.messages
+            .push(serde_json::json!({"role":"user","content":"latest"}));
+        ctx
+    };
+
+    let (tx, _rx) = mpsc::channel::<LoopEvent>(64);
+
+    // Sub-threshold: the summarizer IS called and reports Failed.
+    for failures in 0..super::MAX_CONSECUTIVE_COMPACTION_FAILURES {
+        let mut ctx = make_ctx();
+        let outcome =
+            super::run_compaction_pass(&mut ctx, &summarize_fn, 5, failures, &None, None, &tx)
+                .await;
+        assert_eq!(
+            outcome,
+            super::SummaryOutcome::Failed,
+            "failures={failures}: summarizer should run and fail"
+        );
+    }
+    let calls_before_open = calls.load(Ordering::SeqCst);
+    assert_eq!(
+        calls_before_open,
+        super::MAX_CONSECUTIVE_COMPACTION_FAILURES as usize,
+        "summarizer should run once per sub-threshold attempt"
+    );
+
+    // At the threshold: breaker open → summarizer NOT called again, and
+    // the cheap prune-only fallback still runs (context doesn't grow).
+    let mut ctx = make_ctx();
+    let n_before = ctx.messages.len();
+    let outcome = super::run_compaction_pass(
+        &mut ctx,
+        &summarize_fn,
+        5,
+        super::MAX_CONSECUTIVE_COMPACTION_FAILURES,
+        &None,
+        None,
+        &tx,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        super::SummaryOutcome::Skipped,
+        "breaker open → summarizer skipped"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        calls_before_open,
+        "breaker open: summarizer must NOT be invoked"
+    );
+    assert!(
+        ctx.messages.len() <= n_before,
+        "prune-only fallback must not grow context"
     );
 }
