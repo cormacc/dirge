@@ -232,6 +232,12 @@ pub struct EditArgs {
 pub struct BashArgs {
     pub command: String,
     pub timeout: Option<u64>,
+    /// When true, run the command detached: the tool returns immediately
+    /// with a shell id and the command's output is delivered later via the
+    /// background-completion notification (same channel as background
+    /// subagents). Defaults to false (synchronous).
+    #[serde(default)]
+    pub background: Option<bool>,
 }
 
 #[derive(Deserialize)]

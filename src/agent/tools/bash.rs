@@ -242,6 +242,11 @@ pub struct BashTool {
     pub ask_tx: Option<AskSender>,
     pub sandbox: Sandbox,
     cache: Option<ToolCache>,
+    /// Shared background registry. When present, a `background: true`
+    /// command runs detached and is tracked here (counted as
+    /// `TaskKind::Shell`); when absent (e.g. some headless paths) the
+    /// `background` flag degrades gracefully to synchronous execution.
+    bg_store: Option<crate::agent::tools::background::BackgroundStore>,
 }
 
 impl BashTool {
@@ -252,6 +257,7 @@ impl BashTool {
             ask_tx,
             sandbox,
             cache: None,
+            bg_store: None,
         }
     }
 
@@ -266,7 +272,19 @@ impl BashTool {
             ask_tx,
             sandbox,
             cache: Some(cache),
+            bg_store: None,
         }
+    }
+
+    /// Inject the shared background-task store so `background: true`
+    /// commands can run detached and be counted as background shells.
+    /// Chainable; `None` leaves the tool synchronous-only.
+    pub fn with_bg_store(
+        mut self,
+        bg_store: Option<crate::agent::tools::background::BackgroundStore>,
+    ) -> Self {
+        self.bg_store = bg_store;
+        self
     }
 }
 
@@ -288,7 +306,8 @@ impl Tool for BashTool {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "Bash command to execute" },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds (optional)" }
+                    "timeout": { "type": "integer", "description": "Timeout in seconds (optional; default 120, or 600 when background)" },
+                    "background": { "type": "boolean", "description": "Run detached: returns immediately with a shell id; the output is delivered automatically when the command finishes (do NOT poll). Use for long-running commands (builds, servers, watchers) so they don't block the turn. Killed at the timeout." }
                 },
                 "required": ["command"]
             }),
@@ -315,10 +334,57 @@ impl Tool for BashTool {
         // children — and theirs — kept running orphaned under PID 1.
         // pi (`bash.ts:76-81`) does this via `detached: true` +
         // `killProcessTree(pid)`.
-        let secs = args.timeout.unwrap_or(120);
+        let background = args.background.unwrap_or(false);
+        // Background commands get a more generous default since they're
+        // meant for long-running work; explicit `timeout` still wins.
+        let secs = args.timeout.unwrap_or(if background { 600 } else { 120 });
         if secs == 0 {
             return Err(ToolError::Msg("timeout must be > 0".to_string()));
         }
+
+        // Detached/background path: spawn, register in the shared store as
+        // a Shell, and return immediately. Output is delivered later via
+        // the same background-completion notification subagents use.
+        // Degrades to synchronous if no store was injected.
+        if background && let Some(store) = &self.bg_store {
+            use crate::agent::tools::background::{TaskKind, TaskState};
+            let running = store.running_count_kind(TaskKind::Shell);
+            let cap = crate::agent::tools::background::BackgroundStore::max_concurrent_shells();
+            if running >= cap {
+                return Err(ToolError::Msg(format!(
+                    "background shell cap reached ({running}/{cap} in flight). Wait for one to finish (its output arrives automatically, or check task_status) or run inline (background=false).",
+                )));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            store.insert(id.clone(), TaskKind::Shell);
+            store.notify_started(&id);
+            // A backgrounded command may mutate the filesystem while it
+            // runs; conservatively drop the per-turn read/grep/list cache.
+            if let Some(ref cache) = self.cache {
+                cache.clear();
+            }
+            let wrapped = self.sandbox.wrap_command(&command);
+            let store_for_task = store.clone();
+            let id_for_task = id.clone();
+            let handle = tokio::spawn(async move {
+                let state = match run_with_timeout(wrapped, secs).await {
+                    Ok(out) => {
+                        let mut body = out.merged;
+                        if out.exit_code != 0 {
+                            body.push_str(&format!("\nExit code: {}", out.exit_code));
+                        }
+                        TaskState::Completed(body)
+                    }
+                    Err(e) => TaskState::Failed(e.to_string()),
+                };
+                store_for_task.notify(&id_for_task, state);
+            });
+            store.attach_handle(&id, handle);
+            return Ok(format!(
+                "background shell started — id: {id} (timeout {secs}s). It runs detached; its output is delivered automatically when it finishes — do NOT poll. To check sooner, use task_status with this id.",
+            ));
+        }
+
         let output = run_with_timeout(self.sandbox.wrap_command(&command), secs).await?;
 
         // F12: `merged` already contains stdout + stderr in arrival
@@ -581,6 +647,59 @@ fn push_segment<'a>(command: &'a str, start: usize, end: usize, out: &mut Vec<&'
 #[cfg(unix)]
 mod tests {
     use super::*;
+
+    /// End-to-end: `background: true` returns immediately with a shell id,
+    /// registers a `TaskKind::Shell` in the store, and delivers the
+    /// command's output via the store's completion path once it finishes.
+    #[tokio::test]
+    async fn background_bash_registers_shell_and_delivers_output() {
+        use crate::agent::tools::BashArgs;
+        use crate::agent::tools::background::{BackgroundStore, TaskKind, TaskState};
+
+        let store = BackgroundStore::new();
+        let tool = BashTool::new(None, None, crate::sandbox::Sandbox::new(false))
+            .with_bg_store(Some(store.clone()));
+
+        let res = tool
+            .call(BashArgs {
+                command: "echo bg-hello".to_string(),
+                timeout: Some(10),
+                background: Some(true),
+            })
+            .await
+            .expect("background bash call");
+        assert!(
+            res.contains("background shell started"),
+            "expected an immediate start message, got: {res}"
+        );
+
+        // Parse the id out of "… id: <id> (timeout …".
+        let id = res
+            .split("id: ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .expect("id in start message")
+            .to_string();
+
+        // Poll until the background command finishes and its output lands.
+        let mut completed = None;
+        for _ in 0..100 {
+            if let Some(task) = store.get(&id)
+                && let TaskState::Completed(out) = task.state
+            {
+                completed = Some(out);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let out = completed.expect("background shell should complete");
+        assert!(
+            out.contains("bg-hello"),
+            "expected command output, got: {out}"
+        );
+        // Handle dropped on completion → no longer counted as a running shell.
+        assert_eq!(store.running_count_kind(TaskKind::Shell), 0);
+    }
 
     /// Test helper: build a single op-based rule (tool-agnostic).
     #[cfg(feature = "semantic-bash")]

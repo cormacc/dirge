@@ -369,12 +369,15 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                 #[cfg(feature = "lsp")]
                 lsp_manager.clone(),
             )),
-            Box::new(tools::BashTool::with_cache(
-                permission.clone(),
-                ask_tx.clone(),
-                sandbox.clone(),
-                cache.clone(),
-            )),
+            Box::new(
+                tools::BashTool::with_cache(
+                    permission.clone(),
+                    ask_tx.clone(),
+                    sandbox.clone(),
+                    cache.clone(),
+                )
+                .with_bg_store(bg_store.clone()),
+            ),
             Box::new(tools::GrepTool::with_cache(
                 permission.clone(),
                 ask_tx.clone(),
@@ -755,7 +758,8 @@ pub async fn build_loop_tools(
                 ask_tx.clone(),
                 sandbox.clone(),
                 cache.clone(),
-            ),
+            )
+            .with_bg_store(bg_store.clone()),
             Some(ToolExecutionMode::Sequential),
         )
         .await,

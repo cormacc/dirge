@@ -1058,7 +1058,10 @@ mod tests {
         use crate::agent::tools::background::{BackgroundStore, TaskState};
 
         let store = BackgroundStore::new();
-        store.insert("sub-1".into());
+        store.insert(
+            "sub-1".into(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
 
         let saw_reminder = Arc::new(Mutex::new(false));
         let saw_clone = saw_reminder.clone();
