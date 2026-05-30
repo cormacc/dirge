@@ -56,6 +56,7 @@ impl StatusLine {
         loop_label: Option<&str>,
         prompt_name: Option<&str>,
         perm_mode: Option<&str>,
+        active_agents: usize,
     ) -> String {
         let state = if is_running { "running" } else { "ready" };
         let wd_path = Path::new(&session.working_dir);
@@ -105,8 +106,17 @@ impl StatusLine {
             _ => String::new(),
         };
 
+        // Active background subagents (task tool). Shown only when any are
+        // running, like the other conditional badges, so the bar stays
+        // quiet during normal single-agent work.
+        let agents_badge = if active_agents > 0 {
+            format!(" | agents:{}", active_agents)
+        } else {
+            String::new()
+        };
+
         format!(
-            "{}{} | {}{} | {}/{} ({}%) | {}msgs | {}{}{}{}",
+            "{}{} | {}{} | {}/{} ({}%) | {}msgs | {}{}{}{}{}",
             project_label,
             cost_str,
             session.model,
@@ -119,6 +129,35 @@ impl StatusLine {
             compact_badge,
             prompt_badge,
             perm_badge,
+            agents_badge,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StatusLine;
+    use crate::session::Session;
+
+    fn render_with_agents(n: usize) -> String {
+        let session = Session::new("openrouter", "test-model", 100_000);
+        StatusLine::render(&session, false, 0, None, None, None, n)
+    }
+
+    #[test]
+    fn agents_badge_hidden_when_none_active() {
+        assert!(
+            !render_with_agents(0).contains("agents:"),
+            "no agents badge expected when zero background subagents are running"
+        );
+    }
+
+    #[test]
+    fn agents_badge_shown_with_count_when_active() {
+        let line = render_with_agents(3);
+        assert!(
+            line.contains("agents:3"),
+            "expected `agents:3` segment in status line, got: {line}"
+        );
     }
 }
