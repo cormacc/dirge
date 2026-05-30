@@ -3,8 +3,9 @@
 //!
 //! The right panel is a vertical stack of `SubPanel`s — each one a
 //! light-rounded box `╭─[TITLE]─╮ … ╰─╯` with left-aligned content.
-//! The left panel paints the DIRGE idle card when no subagents are
-//! active, or a list of subagent status rows when there are.
+//! The left panel paints the session vitals (CONTEXT / ACTIVITY / GIT);
+//! when subagents are running it renders their status rows BELOW the
+//! vitals rather than replacing them.
 //!
 //! All horizontals (top frame's [AGENT STATUS] / [SYSTEM] labels)
 //! are owned by `TopFrame` — these widgets paint INSIDE
@@ -127,8 +128,9 @@ impl<'a> Widget for SubPanel<'a> {
     }
 }
 
-/// Left panel widget. Renders the DIRGE idle card (subagents
-/// empty) or a list of subagent status rows (otherwise).
+/// Left panel widget. Always renders the session vitals (context gauge,
+/// activity ticker, git); when subagents are running, their status rows
+/// render in a reserved region BELOW the vitals.
 pub struct LeftPanel<'a> {
     info: &'a LeftPanelInfo,
     subagents: &'a [SubagentStatusRow],
@@ -152,9 +154,42 @@ impl<'a> Widget for LeftPanel<'a> {
         }
         if self.subagents.is_empty() {
             paint_idle_card(buf, area, self.info, self.style);
-        } else {
-            paint_subagent_list(buf, area, self.subagents);
+            return;
         }
+        // Running subagents render BELOW the vitals (CONTEXT/ACTIVITY/GIT),
+        // not in place of them. Reserve the subagents' natural height,
+        // capped at ~half the panel so the vitals always keep room; the
+        // vitals lay out into the top region and self-clip.
+        let natural_sub: u16 = LEFT_PANEL_TOP_PAD
+            + self
+                .subagents
+                .iter()
+                .map(|r| 2 + r.files.len() as u16)
+                .sum::<u16>();
+        let sub_h = natural_sub.min(area.height / 2);
+        if sub_h == 0 {
+            // Panel too short to host both — keep the vitals.
+            paint_idle_card(buf, area, self.info, self.style);
+            return;
+        }
+        let vitals_h = area.height - sub_h;
+        paint_idle_card(
+            buf,
+            Rect::new(area.x, area.y, area.width, vitals_h),
+            self.info,
+            self.style,
+        );
+        // Subagent region: a dim "agents" label on its pad row, then the
+        // status rows (paint_subagent_list starts content one row down).
+        let sub_area = Rect::new(area.x, area.y + vitals_h, area.width, sub_h);
+        buf.set_stringn(
+            sub_area.x,
+            sub_area.y,
+            "── agents ──",
+            sub_area.width as usize,
+            Style::default().fg(RColor::DarkGray),
+        );
+        paint_subagent_list(buf, sub_area, self.subagents);
     }
 }
 
@@ -774,16 +809,28 @@ mod tests {
         );
     }
 
-    /// LeftPanel with subagents lists status rows.
+    /// LeftPanel with subagents renders the vitals AND the subagent rows
+    /// BELOW them (subagents no longer replace the vitals).
     #[test]
-    fn left_panel_lists_subagents() {
-        let info = LeftPanelInfo::default();
+    fn left_panel_subagents_render_below_vitals() {
+        use crate::ui::panel_data::ContextGauge;
+        let info = LeftPanelInfo {
+            context: ContextGauge {
+                used: 5000,
+                window: 128_000,
+                pct: 4,
+                compactions: 0,
+                fold_soon: false,
+            },
+            activity: vec!["read x.rs".into()],
+            git: None,
+        };
         let subs = vec![
             SubagentStatusRow {
                 id_short: "abc123".into(),
                 state: "running".into(),
                 prompt_short: "do thing".into(),
-                files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+                files: vec!["src/main.rs".into()],
             },
             SubagentStatusRow {
                 id_short: "def456".into(),
@@ -792,42 +839,35 @@ mod tests {
                 files: vec![],
             },
         ];
-        let mut backend = TestBackend::new(30, 7);
-        let mut terminal = Terminal::new(backend.clone()).unwrap();
+        let backend = TestBackend::new(30, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| {
-                let area = Rect::new(0, 0, 30, 7);
-                f.render_widget(LeftPanel::new(&info, &subs), area);
-            })
+            .draw(|f| f.render_widget(LeftPanel::new(&info, &subs), Rect::new(0, 0, 30, 24)))
             .unwrap();
-        backend = terminal.backend().clone();
-        // Format with file lines on the first subagent:
-        //   row 0: blank (LEFT_PANEL_TOP_PAD)
-        //   row 1: ⋯ ...bc123       (hash line for subagent 0)
-        //   row 2:    do thing       (prompt line, indented)
-        //   row 3:      src/main.rs  (file line)
-        //   row 4:      src/lib.rs   (file line)
-        //   row 5: ✓ ...ef456       (hash line for subagent 1)
-        //   row 6:    done
-        let row_at = |y: u16| -> String {
-            (0..30)
-                .map(|x| backend.buffer().cell((x, y)).unwrap().symbol().to_string())
-                .collect()
-        };
+        let backend = terminal.backend().clone();
+        let rows: Vec<String> = (0..24)
+            .map(|y| {
+                (0..30)
+                    .map(|x| backend.buffer().cell((x, y)).unwrap().symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        let dump = rows.join("\n");
+        // Vitals still present.
+        assert!(dump.contains("CONTEXT"), "vitals dropped:\n{dump}");
+        // Subagents present, below the vitals, under the "agents" header.
+        assert!(dump.contains("agents"), "agents header missing:\n{dump}");
+        assert!(dump.contains("...abc123"), "subagent row missing:\n{dump}");
         assert!(
-            row_at(1).starts_with("⋯ ...abc123"),
-            "row1 = {:?}",
-            row_at(1)
+            dump.contains("do thing"),
+            "subagent prompt missing:\n{dump}"
         );
-        assert!(row_at(2).contains("do thing"), "row2 = {:?}", row_at(2));
-        assert!(row_at(3).contains("src/main.rs"), "row3 = {:?}", row_at(3));
-        assert!(row_at(4).contains("src/lib.rs"), "row4 = {:?}", row_at(4));
+        let agents_y = rows.iter().position(|r| r.contains("agents")).unwrap();
+        let context_y = rows.iter().position(|r| r.contains("CONTEXT")).unwrap();
         assert!(
-            row_at(5).starts_with("✓ ...def456"),
-            "row5 = {:?}",
-            row_at(5)
+            context_y < agents_y,
+            "CONTEXT ({context_y}) must sit above agents ({agents_y})"
         );
-        assert!(row_at(6).contains("done"), "row6 = {:?}", row_at(6));
     }
 
     /// RightPanel stacks sub-panels and shows their titles.
