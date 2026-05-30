@@ -25,9 +25,15 @@ const STORE_CAPACITY: usize = 32;
 /// tasks (audit M2). Without this cap a misbehaving LLM could spawn
 /// dozens of background tasks in parallel and burn the user's API
 /// budget. Hit by tracking the in-flight JoinHandle count via
-/// `running_count()`; the `task` tool refuses new background spawns
+/// `running_count_kind(Subagent)`; the `task` tool refuses new spawns
 /// when at-cap with a clear error rather than queueing.
 const MAX_CONCURRENT_SUBAGENTS: usize = 4;
+
+/// Maximum number of concurrently running detached background shells
+/// (the `bash` tool's `background` arg). Same rationale as the subagent
+/// cap — a runaway model shouldn't be able to spawn unbounded detached
+/// processes. Counted per-kind via `running_count_kind(TaskKind::Shell)`.
+const MAX_CONCURRENT_BG_SHELLS: usize = 8;
 
 /// Event surfaced on the UI lifecycle channel.
 ///
@@ -86,9 +92,21 @@ pub enum TaskState {
     Failed(String),
 }
 
+/// What kind of background work an entry represents. The store tracks
+/// both background subagents (the `task` tool) and detached shells (the
+/// `bash` tool's `background` arg) through the SAME delivery pipeline —
+/// `kind` lets the status bar count them separately (`agents:N` /
+/// `shells:N`) and lets each tool enforce its own concurrency cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Subagent,
+    Shell,
+}
+
 #[derive(Debug, Clone)]
 pub struct BackgroundTask {
     pub state: TaskState,
+    pub kind: TaskKind,
 }
 
 /// A completion event ready to be surfaced to the parent agent at its next
@@ -119,8 +137,9 @@ impl BackgroundStore {
 
     /// Insert a new task in Running state. If the store is at capacity, the
     /// oldest task is evicted to make room. Inserting an existing id replaces
-    /// it in place without evicting anything.
-    pub fn insert(&self, id: String) {
+    /// it in place without evicting anything. `kind` distinguishes a
+    /// background subagent from a detached shell (drives the per-kind counts).
+    pub fn insert(&self, id: String, kind: TaskKind) {
         let mut inner = self.lock();
         if !inner.tasks.contains_key(&id) && inner.tasks.len() >= STORE_CAPACITY {
             // Evict the oldest by insertion order. shift_remove preserves order
@@ -131,6 +150,7 @@ impl BackgroundStore {
             id,
             BackgroundTask {
                 state: TaskState::Running,
+                kind,
             },
         );
     }
@@ -140,17 +160,29 @@ impl BackgroundStore {
         self.lock().tasks.get(id).cloned()
     }
 
-    /// Count of subagent tasks currently in flight. Equal to the
-    /// number of live `JoinHandle`s the store is tracking. Used by
-    /// the `task` tool to refuse a new background spawn when at the
-    /// `MAX_CONCURRENT_SUBAGENTS` cap (audit M2).
-    pub fn running_count(&self) -> usize {
-        self.lock().handles.len()
+    /// Count of in-flight tasks of a specific `kind`. A task is "running"
+    /// while it still holds a live `JoinHandle`; `notify`/`cancel_all`
+    /// drop the handle, so an entry counts iff it is both Running and of
+    /// the requested kind. Drives the status bar's separate `agents:N` /
+    /// `shells:N` segments and each tool's per-kind concurrency cap.
+    pub fn running_count_kind(&self, kind: TaskKind) -> usize {
+        let inner = self.lock();
+        inner
+            .handles
+            .keys()
+            .filter_map(|id| inner.tasks.get(id))
+            .filter(|t| t.kind == kind)
+            .count()
     }
 
     /// Compile-time cap on concurrent subagent spawns.
     pub fn max_concurrent() -> usize {
         MAX_CONCURRENT_SUBAGENTS
+    }
+
+    /// Compile-time cap on concurrent detached background shells.
+    pub fn max_concurrent_shells() -> usize {
+        MAX_CONCURRENT_BG_SHELLS
     }
 
     /// Record a terminal state (Completed or Failed) and queue a notification
@@ -429,7 +461,7 @@ mod tests {
     #[test]
     fn insert_then_get_returns_running() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         let task = store.get("t1").expect("task present");
         assert_eq!(task.state, TaskState::Running);
     }
@@ -448,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_all_aborts_in_flight_tasks() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
 
         // Spawn a long-running task and register its handle.
         let store_for_task = store.clone();
@@ -461,7 +493,7 @@ mod tests {
 
         // Also enqueue a stale pending notification to verify
         // cancel_all clears the queue.
-        store.insert("t_stale".into());
+        store.insert("t_stale".into(), TaskKind::Subagent);
         store.notify("t_stale", TaskState::Completed("prev session".into()));
         assert_eq!(store.pending_len(), 1);
 
@@ -491,7 +523,7 @@ mod tests {
     #[test]
     fn regression_get_is_read_only_after_completion() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("done".into()));
 
         for _ in 0..3 {
@@ -504,7 +536,7 @@ mod tests {
     #[test]
     fn notify_pushes_completed_to_pending_queue() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("done".into()));
         assert_eq!(store.pending_len(), 1);
     }
@@ -518,7 +550,7 @@ mod tests {
     #[test]
     fn regression_notify_relays_large_completed_payload() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         // Multi-line payload well past the 8 KiB byte threshold AND
         // the 200-line threshold so the relay fires AND its
         // head/tail summary elides the middle.
@@ -545,7 +577,7 @@ mod tests {
     #[test]
     fn regression_notify_truncates_failed_error() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         let huge = "e".repeat(MAX_TASK_OUTPUT_CHARS * 2);
         let huge_len = huge.len();
         store.notify("t1", TaskState::Failed(huge));
@@ -572,7 +604,7 @@ mod tests {
     #[test]
     fn small_completed_payload_passes_through_relay_verbatim() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         let small = "subagent answer: 42\nplus a couple more lines.\n".to_string();
         store.notify("t1", TaskState::Completed(small.clone()));
 
@@ -593,7 +625,7 @@ mod tests {
     #[test]
     fn notify_with_running_state_is_noop() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Running);
         assert_eq!(store.pending_len(), 0);
         // State unchanged.
@@ -606,7 +638,7 @@ mod tests {
     #[test]
     fn regression_double_notify_enqueues_once() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("first".into()));
         store.notify("t1", TaskState::Completed("second".into()));
         assert_eq!(store.pending_len(), 1);
@@ -620,8 +652,8 @@ mod tests {
     #[test]
     fn drain_returns_pending_then_empties_queue() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
-        store.insert("t2".into());
+        store.insert("t1".into(), TaskKind::Subagent);
+        store.insert("t2".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("a".into()));
         store.notify("t2", TaskState::Failed("b".into()));
 
@@ -641,7 +673,7 @@ mod tests {
     #[test]
     fn drain_is_empty_when_nothing_pending() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         // Insert alone doesn't enqueue — only notify() does.
         assert!(store.drain_notifications().is_empty());
     }
@@ -652,11 +684,11 @@ mod tests {
     fn regression_lru_evicts_oldest_at_capacity() {
         let store = BackgroundStore::new();
         for i in 0..STORE_CAPACITY {
-            store.insert(format!("t{i}"));
+            store.insert(format!("t{i}"), TaskKind::Subagent);
         }
         assert_eq!(store.len(), STORE_CAPACITY);
         // One more push past capacity.
-        store.insert("overflow".into());
+        store.insert("overflow".into(), TaskKind::Subagent);
         assert_eq!(store.len(), STORE_CAPACITY);
         // The oldest (t0) is gone; the newest is retained.
         assert!(store.get("t0").is_none());
@@ -670,10 +702,10 @@ mod tests {
     fn re_insert_existing_id_does_not_evict() {
         let store = BackgroundStore::new();
         for i in 0..STORE_CAPACITY {
-            store.insert(format!("t{i}"));
+            store.insert(format!("t{i}"), TaskKind::Subagent);
         }
         // Re-insert at capacity: the existing id should just be reset.
-        store.insert("t5".into());
+        store.insert("t5".into(), TaskKind::Subagent);
         assert_eq!(store.len(), STORE_CAPACITY);
         assert!(store.get("t0").is_some(), "oldest must NOT be evicted");
         assert_eq!(store.get("t5").unwrap().state, TaskState::Running);
@@ -685,9 +717,9 @@ mod tests {
     fn regression_notify_on_evicted_id_is_noop() {
         let store = BackgroundStore::new();
         for i in 0..STORE_CAPACITY {
-            store.insert(format!("t{i}"));
+            store.insert(format!("t{i}"), TaskKind::Subagent);
         }
-        store.insert("overflow".into()); // evicts t0
+        store.insert("overflow".into(), TaskKind::Subagent); // evicts t0
 
         store.notify("t0", TaskState::Completed("late".into()));
         assert_eq!(store.pending_len(), 0);
@@ -699,7 +731,7 @@ mod tests {
     fn clones_share_state() {
         let a = BackgroundStore::new();
         let b = a.clone();
-        a.insert("t1".into());
+        a.insert("t1".into(), TaskKind::Subagent);
         b.notify("t1", TaskState::Completed("via b".into()));
 
         let drained = a.drain_notifications();
@@ -718,7 +750,7 @@ mod tests {
     #[test]
     fn prepend_passthrough_when_nothing_pending() {
         let store = BackgroundStore::new();
-        store.insert("t1".into()); // running, not pending
+        store.insert("t1".into(), TaskKind::Subagent); // running, not pending
         let out = prepend_pending_notifications("hello", Some(&store));
         assert_eq!(out, "hello");
     }
@@ -726,7 +758,7 @@ mod tests {
     #[test]
     fn prepend_formats_system_reminder() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("the result".into()));
 
         let out = prepend_pending_notifications("user msg", Some(&store));
@@ -740,7 +772,7 @@ mod tests {
     #[test]
     fn prepend_includes_failed_tasks() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Failed("kaboom".into()));
 
         let out = prepend_pending_notifications("user msg", Some(&store));
@@ -754,7 +786,7 @@ mod tests {
     #[test]
     fn regression_prepend_drains_queue_once() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("once".into()));
 
         let first = prepend_pending_notifications("msg", Some(&store));
@@ -768,7 +800,7 @@ mod tests {
     fn prepend_includes_all_pending_tasks_in_order() {
         let store = BackgroundStore::new();
         for i in 0..3 {
-            store.insert(format!("t{i}"));
+            store.insert(format!("t{i}"), TaskKind::Subagent);
             store.notify(&format!("t{i}"), TaskState::Completed(format!("r{i}")));
         }
         let out = prepend_pending_notifications("msg", Some(&store));
@@ -792,7 +824,7 @@ mod tests {
     async fn ui_sink_receives_completion_event() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let store = BackgroundStore::with_ui_sink(tx);
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("done".into()));
 
         let notif = unwrap_finished(rx.recv().await.expect("event delivered"));
@@ -804,7 +836,7 @@ mod tests {
     async fn ui_sink_receives_failure_event() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let store = BackgroundStore::with_ui_sink(tx);
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Failed("boom".into()));
 
         let notif = unwrap_finished(rx.recv().await.unwrap());
@@ -821,7 +853,7 @@ mod tests {
     async fn ui_sink_event_carries_relayed_payload() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let store = BackgroundStore::with_ui_sink(tx);
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         // Multi-line payload well over the 200-line threshold and
         // 8 KiB byte threshold so the relay's head/tail summary
         // elides the middle (single-line payloads still relay but
@@ -857,7 +889,7 @@ mod tests {
     async fn ui_sink_does_not_receive_running_state() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let store = BackgroundStore::with_ui_sink(tx);
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Running);
 
         // Drain non-blockingly: nothing should be queued.
@@ -879,12 +911,12 @@ mod tests {
     #[test]
     fn regression_drain_returns_snapshotted_state_after_eviction() {
         let store = BackgroundStore::new();
-        store.insert("victim".into());
+        store.insert("victim".into(), TaskKind::Subagent);
         store.notify("victim", TaskState::Completed("the result".into()));
 
         // Push enough new inserts to evict "victim" from the task map.
         for i in 0..STORE_CAPACITY {
-            store.insert(format!("filler{i}"));
+            store.insert(format!("filler{i}"), TaskKind::Subagent);
         }
         assert!(store.get("victim").is_none(), "victim must be evicted");
 
@@ -902,7 +934,7 @@ mod tests {
     async fn notify_started_fires_only_on_ui_sink() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let store = BackgroundStore::with_ui_sink(tx);
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify_started("t1");
 
         let evt = rx.recv().await.expect("Started event delivered");
@@ -932,7 +964,7 @@ mod tests {
     async fn ui_sink_send_after_receiver_dropped_is_silent() {
         let (tx, rx) = mpsc::unbounded_channel();
         let store = BackgroundStore::with_ui_sink(tx);
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         drop(rx);
         // Must not panic.
         store.notify("t1", TaskState::Completed("payload".into()));
@@ -953,7 +985,7 @@ mod tests {
     #[tokio::test]
     async fn subagent_completion_injects_followup_message() {
         let store = BackgroundStore::new();
-        store.insert("abc123".into());
+        store.insert("abc123".into(), TaskKind::Subagent);
         store.notify("abc123", TaskState::Completed("the answer is 42".into()));
 
         let hook = followup_from_background_store(store.clone());
@@ -982,7 +1014,7 @@ mod tests {
     #[tokio::test]
     async fn subagent_failure_injects_followup_with_error_marker() {
         let store = BackgroundStore::new();
-        store.insert("xyz789".into());
+        store.insert("xyz789".into(), TaskKind::Subagent);
         store.notify(
             "xyz789",
             TaskState::Failed("connection reset by peer".into()),
@@ -1012,7 +1044,7 @@ mod tests {
     async fn followup_batches_multiple_completions_in_one_reminder() {
         let store = BackgroundStore::new();
         for i in 0..3 {
-            store.insert(format!("t{i}"));
+            store.insert(format!("t{i}"), TaskKind::Subagent);
             store.notify(
                 &format!("t{i}"),
                 TaskState::Completed(format!("result-{i}")),
@@ -1042,7 +1074,7 @@ mod tests {
     #[tokio::test]
     async fn followup_returns_empty_when_no_completions() {
         let store = BackgroundStore::new();
-        store.insert("running".into()); // inserted but not notified
+        store.insert("running".into(), TaskKind::Subagent); // inserted but not notified
         let hook = followup_from_background_store(store);
         assert!(hook().await.is_empty());
     }
@@ -1055,7 +1087,7 @@ mod tests {
     #[tokio::test]
     async fn followup_drains_queue_once() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert("t1".into(), TaskKind::Subagent);
         store.notify("t1", TaskState::Completed("once".into()));
 
         let hook = followup_from_background_store(store);
@@ -1077,7 +1109,7 @@ mod tests {
             let s = store.clone();
             let id = format!("t{i}");
             handles.push(std::thread::spawn(move || {
-                s.insert(id.clone());
+                s.insert(id.clone(), TaskKind::Subagent);
                 s.notify(&id, TaskState::Completed(format!("done-{i}")));
             }));
         }

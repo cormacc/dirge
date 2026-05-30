@@ -320,7 +320,9 @@ impl Tool for TaskTool {
             // concurrency cap. The agent gets a clear refusal it
             // can act on (wait for an existing task to finish, then
             // retry) rather than fanning out unbounded.
-            let running = self.bg_store.running_count();
+            let running = self
+                .bg_store
+                .running_count_kind(crate::agent::tools::background::TaskKind::Subagent);
             let cap = BackgroundStore::max_concurrent();
             if running >= cap {
                 return Err(ToolError::Msg(format!(
@@ -329,7 +331,10 @@ impl Tool for TaskTool {
                 )));
             }
             let task_id = Uuid::new_v4().to_string();
-            self.bg_store.insert(task_id.clone());
+            self.bg_store.insert(
+                task_id.clone(),
+                crate::agent::tools::background::TaskKind::Subagent,
+            );
             self.bg_store.notify_started(&task_id);
 
             // dirge-ov2 Phase D: announce the subagent so the UI

@@ -456,7 +456,7 @@ pub async fn run_interactive(
                 None,
                 context.current_prompt_name.as_deref(),
                 perm_mode().as_deref(),
-                bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0),
+                bg_store.as_ref(),
             ),
             interjection_queue.lock().unwrap().len(),
         ),
@@ -714,7 +714,7 @@ pub async fn run_interactive(
                         renderer.render_viewport()?;
                         renderer.draw_bottom(
                             &input,
-                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                             is_running,
                         )?;
                         continue;
@@ -748,7 +748,7 @@ pub async fn run_interactive(
                         renderer.render_viewport()?;
                         renderer.draw_bottom(
                             &input,
-                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                             is_running,
                         )?;
                         continue;
@@ -762,7 +762,7 @@ pub async fn run_interactive(
                         renderer.render_viewport()?;
                         renderer.draw_bottom(
                             &input,
-                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                             is_running,
                         )?;
                         continue;
@@ -771,7 +771,7 @@ pub async fn run_interactive(
                         input.handle_paste(&text);
                         renderer.draw_bottom(
                             &input,
-                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                             is_running,
                         )?;
                         continue;
@@ -784,7 +784,7 @@ pub async fn run_interactive(
                         renderer.render_viewport()?;
                         renderer.draw_bottom(
                             &input,
-                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                             is_running,
                         )?;
                         continue;
@@ -800,7 +800,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -810,7 +810,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -885,7 +885,7 @@ pub async fn run_interactive(
                                 )?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                             } else {
@@ -931,7 +931,7 @@ pub async fn run_interactive(
                             renderer.write_line(msg, c_error())?;
                             renderer.draw_bottom(
                                 &input,
-                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                 is_running,
                             )?;
                             continue;
@@ -948,7 +948,7 @@ pub async fn run_interactive(
                             }
                             renderer.draw_bottom(
                                 &input,
-                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                 is_running,
                             )?;
                             if rewind_picker.active {
@@ -966,7 +966,7 @@ pub async fn run_interactive(
                                     rewind_picker.draw()?;
                                     renderer.draw_bottom(
                                         &input,
-                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                         is_running,
                                     )?;
                                     continue;
@@ -975,7 +975,7 @@ pub async fn run_interactive(
                             renderer.write_line("Press Esc again to rewind...", theme::dim())?;
                             renderer.draw_bottom(
                                 &input,
-                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                 is_running,
                             )?;
                             continue;
@@ -995,7 +995,7 @@ pub async fn run_interactive(
                             )?;
                             renderer.draw_bottom(
                                 &input,
-                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                 is_running,
                             )?;
                             continue;
@@ -1066,7 +1066,7 @@ pub async fn run_interactive(
                             renderer.render_viewport()?;
                             renderer.draw_bottom(
                                 &input,
-                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                 is_running,
                             )?;
                             continue;
@@ -1119,7 +1119,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1132,7 +1132,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1142,7 +1142,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1152,7 +1152,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1161,7 +1161,7 @@ pub async fn run_interactive(
                                 renderer.scroll_to_bottom()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1174,7 +1174,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 if let Some(ref picker) = input.picker {
@@ -1211,7 +1211,7 @@ pub async fn run_interactive(
                                 }
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1249,7 +1249,7 @@ pub async fn run_interactive(
                                 )?;
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1270,7 +1270,7 @@ pub async fn run_interactive(
                                     )?;
                                     renderer.draw_bottom(
                                         &input,
-                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                         is_running,
                                     )?;
                                     continue;
@@ -1325,7 +1325,7 @@ pub async fn run_interactive(
                                 }
                                 renderer.draw_bottom(
                                     &input,
-                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                     is_running,
                                 )?;
                                 continue;
@@ -1367,7 +1367,7 @@ pub async fn run_interactive(
                                     )?;
                                     renderer.draw_bottom(
                                         &input,
-                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                         is_running,
                                     )?;
                                     continue;
@@ -1705,7 +1705,7 @@ pub async fn run_interactive(
                         }
                         renderer.draw_bottom(
                             &input,
-                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                             is_running,
                         )?;
                         if let Some(ref picker) = input.picker {
@@ -2427,7 +2427,7 @@ pub async fn run_interactive(
                 }
                 renderer.draw_bottom(
                     &input,
-                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {
@@ -2552,7 +2552,7 @@ pub async fn run_interactive(
                             loop_label.as_deref(),
                             context.current_prompt_name.as_deref(),
                             perm_mode().as_deref(),
-                            bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0),
+                            bg_store.as_ref(),
                         ),
                         interjection_queue.lock().unwrap().len(),
                     ),
@@ -2633,7 +2633,7 @@ pub async fn run_interactive(
                                 loop_label.as_deref(),
                                 context.current_prompt_name.as_deref(),
                                 perm_mode().as_deref(),
-                                bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0),
+                                bg_store.as_ref(),
                             ),
                             interjection_queue.lock().unwrap().len(),
                         ),
@@ -2656,7 +2656,7 @@ pub async fn run_interactive(
                                     renderer.render_viewport()?;
                                     renderer.draw_bottom(
                                         &input,
-                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                         is_running,
                                     )?;
                                     continue;
@@ -2905,7 +2905,7 @@ pub async fn run_interactive(
                 renderer.render_viewport()?;
                 renderer.draw_bottom(
                     &input,
-                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {
@@ -2989,7 +2989,7 @@ pub async fn run_interactive(
                             loop_label.as_deref(),
                             context.current_prompt_name.as_deref(),
                             perm_mode().as_deref(),
-                            bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0),
+                            bg_store.as_ref(),
                         ),
                         interjection_queue.lock().unwrap().len(),
                     ),
@@ -3053,7 +3053,7 @@ pub async fn run_interactive(
                 renderer.render_viewport()?;
                 renderer.draw_bottom(
                     &input,
-                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                     is_running,
                 )?;
             }
@@ -3282,7 +3282,7 @@ pub async fn run_interactive(
                     is_running = true;
                     renderer.draw_bottom(
                         &input,
-                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                        &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                         is_running,
                     )?;
                 }
@@ -3435,7 +3435,7 @@ pub async fn run_interactive(
                         renderer.render_viewport()?;
                         renderer.draw_bottom(
                             &input,
-                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                             is_running,
                         )?;
 
@@ -3510,7 +3510,7 @@ pub async fn run_interactive(
                                         renderer.render_viewport()?;
                                         renderer.draw_bottom(
                                             &input,
-                                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                            &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                             is_running,
                                         )?;
                                         let ev = user_rx.recv().await;
@@ -3600,7 +3600,7 @@ pub async fn run_interactive(
                 renderer.render_viewport()?;
                 renderer.draw_bottom(
                     &input,
-                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {
@@ -3664,7 +3664,7 @@ pub async fn run_interactive(
                                             renderer.render_viewport()?;
                                             renderer.draw_bottom(
                                                 &input,
-                                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                                 is_running,
                                             )?;
                                             continue;
@@ -3734,7 +3734,7 @@ pub async fn run_interactive(
                                             renderer.render_viewport()?;
                                             renderer.draw_bottom(
                                                 &input,
-                                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                                 is_running,
                                             )?;
                                             continue;
@@ -3780,7 +3780,7 @@ pub async fn run_interactive(
                 }
                 renderer.draw_bottom(
                     &input,
-                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                     is_running,
                 )?;
             }
@@ -3820,7 +3820,7 @@ pub async fn run_interactive(
                             renderer.render_viewport()?;
                             renderer.draw_bottom(
                                 &input,
-                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                                &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                                 is_running,
                             )?;
                             continue;
@@ -3893,7 +3893,7 @@ pub async fn run_interactive(
                 renderer.render_viewport()?;
                 renderer.draw_bottom(
                     &input,
-                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {
@@ -3903,7 +3903,7 @@ pub async fn run_interactive(
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(200)), if is_running => {
                 renderer.draw_bottom(
                     &input,
-                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref().map(|s| s.running_count()).unwrap_or(0)), interjection_queue.lock().unwrap().len()),
+                    &with_queue(StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), bg_store.as_ref()), interjection_queue.lock().unwrap().len()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {

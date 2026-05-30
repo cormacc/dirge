@@ -162,7 +162,10 @@ mod tests {
     #[tokio::test]
     async fn test_task_status_running() {
         let store = BackgroundStore::new();
-        store.insert("test-task".to_string());
+        store.insert(
+            "test-task".to_string(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
         let tool = TaskStatusTool::new(store);
         let result = tool
             .call(TaskStatusArgs {
@@ -177,7 +180,10 @@ mod tests {
     #[tokio::test]
     async fn test_task_status_completed() {
         let store = BackgroundStore::new();
-        store.insert("test-task".to_string());
+        store.insert(
+            "test-task".to_string(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
         store.notify("test-task", TaskState::Completed("result text".to_string()));
         let tool = TaskStatusTool::new(store);
         let result = tool
@@ -194,7 +200,10 @@ mod tests {
     #[tokio::test]
     async fn test_task_status_failed() {
         let store = BackgroundStore::new();
-        store.insert("test-task".to_string());
+        store.insert(
+            "test-task".to_string(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
         store.notify("test-task", TaskState::Failed("error message".to_string()));
         let tool = TaskStatusTool::new(store);
         let result = tool
@@ -211,7 +220,10 @@ mod tests {
     #[tokio::test]
     async fn test_task_status_wait_completed() {
         let store = BackgroundStore::new();
-        store.insert("test-task".to_string());
+        store.insert(
+            "test-task".to_string(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
 
         // Update to completed after a short delay
         let store_clone = store.clone();
@@ -269,7 +281,10 @@ mod tests {
     #[tokio::test]
     async fn status_lookup_is_idempotent() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert(
+            "t1".into(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
         store.notify("t1", TaskState::Completed("payload".into()));
 
         let tool = TaskStatusTool::new(store);
@@ -291,7 +306,10 @@ mod tests {
     #[tokio::test]
     async fn wait_returns_on_failure() {
         let store = BackgroundStore::new();
-        store.insert("t1".into());
+        store.insert(
+            "t1".into(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
 
         let store_clone = store.clone();
         tokio::spawn(async move {
@@ -341,7 +359,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn wait_returns_timeout_message_when_task_stays_running() {
         let store = BackgroundStore::new();
-        store.insert("forever".into());
+        store.insert(
+            "forever".into(),
+            crate::agent::tools::background::TaskKind::Subagent,
+        );
         let tool = TaskStatusTool::new(store);
 
         // Drive the future with a parallel timer that advances past the cap.
