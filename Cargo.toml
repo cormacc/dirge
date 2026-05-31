@@ -27,6 +27,8 @@ exclude = [
     ".beads/",
     ".dirge/",
     ".github/",
+    # Marketing / authoring draft — not part of the crate's source.
+    "blog.md",
 ]
 
 # The crate is `dirge-agent` but the command users invoke stays `dirge`.
