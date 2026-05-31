@@ -2,6 +2,8 @@
 
 A minimal, fast coding agent written in Rust — inspired by [pi](https://pi.dev/docs/latest/usage), [opencode](https://opencode.ai/), and [maki](https://github.com/tontinton/maki).
 
+A dirge is a song to keep the dead from losing their way. It turns grief into something that is remembered. Agents are like mayflies awoken for a moment to work and to forget, with every new session effacing the old one. Dirge keeps watch over things said and done, always folding context into memory to carry past mistakes and preferences across the gulf between sessions. It sings the past forward, so that no grave need be dug twice. Dirge grieves for nothing, since nothing is truly buried under its care, and its lament is a promise that what was built here once will be remembered.
+
 ## Why dirge
 
 What sets dirge apart from other agentic editors:
