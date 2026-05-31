@@ -400,5 +400,6 @@ In [`plugins/`](../plugins/):
 - `local_openai.janet` — `harness/register-provider` for a local LLM.
 - `session_tree.janet` — `harness/set-label` and `harness/new-session`.
 - `workflow.janet` — multi-phase inversion of control.
+- `plan_search.janet` — `/plan <task>` runs a task with diverse natural-language planning before code (PlanSearch, arXiv:2409.03733), via `harness/request-prompt`.
 - `turn_timer/` — a multi-file plugin sharing state across files.
 - `response_inspector.janet`, `test_plugin.janet` — smaller probes.
