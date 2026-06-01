@@ -67,8 +67,8 @@ use crate::shell;
 #[cfg(feature = "plugin")]
 use crate::ui::agent_io::render_plugin_entry;
 use crate::ui::agent_io::{
-    RENDER_FRAME, apply_subagent_panel_event, capture_partial_on_abort, persist_turn_to_db,
-    render_agent_stream, should_render_token,
+    RENDER_FRAME, apply_subagent_panel_event, capture_partial_on_abort, render_agent_stream,
+    should_render_token,
 };
 use crate::ui::chat_state::{ChatUiState, load_chat_ui_state, save_chat_ui_state};
 use crate::ui::colors::{c_agent, c_error, c_perm, c_tool, resolve_color};
@@ -86,8 +86,7 @@ use crate::ui::slash::{handle_compress, handle_slash};
 use crate::ui::status::StatusLine;
 use crate::ui::terminal::TerminalGuard;
 use crate::ui::text_output::{
-    sanitize_single_line, strip_leading_system_reminder, with_queue, write_system_lines,
-    write_user_lines,
+    sanitize_single_line, strip_leading_system_reminder, with_queue, write_user_lines,
 };
 use tool_display::*;
 
@@ -500,6 +499,29 @@ pub async fn run_interactive(
                 last_user_prompt: &mut last_user_prompt,
                 cli,
                 cfg,
+            }
+        };
+    }
+
+    // dirge-4y4l: bundle the shared build_agent inputs so the agent-rebuild
+    // handlers (done / context_overflow / context_compacted) take one
+    // `&AgentBuildDeps` instead of ~10 individual params.
+    macro_rules! make_agent_build_deps {
+        () => {
+            run_handlers::AgentBuildDeps {
+                client: &client,
+                permission: &permission,
+                ask_tx: &ask_tx,
+                question_tx: &question_tx,
+                plan_tx: &plan_tx,
+                bg_store: &bg_store,
+                sandbox: &sandbox,
+                #[cfg(feature = "mcp")]
+                mcp_manager: mcp_manager.as_ref(),
+                #[cfg(feature = "semantic")]
+                semantic_manager,
+                #[cfg(feature = "lsp")]
+                lsp_manager: lsp_manager.as_ref(),
             }
         };
     }
@@ -2088,25 +2110,13 @@ pub async fn run_interactive(
                             &mut was_reasoning,
                             &mut is_running,
                             &mut agent,
-                            &client,
                             context,
-                            &permission,
-                            &ask_tx,
-                            &question_tx,
-                            &plan_tx,
-                            &bg_store,
-                            &sandbox,
+                            &make_agent_build_deps!(),
                             &mut agent_rx,
                             &mut agent_abort,
                             &mut agent_interject,
                             &mut agent_cancel,
                             &interjection_queue,
-                            #[cfg(feature = "mcp")]
-                            mcp_manager.as_ref(),
-                            #[cfg(feature = "semantic")]
-                            semantic_manager,
-                            #[cfg(feature = "lsp")]
-                            lsp_manager.as_ref(),
                             #[cfg(feature = "plugin")]
                             plugin_manager,
                             #[cfg(feature = "loop")]
@@ -2173,102 +2183,32 @@ pub async fn run_interactive(
                             &mut was_reasoning,
                             &mut is_running,
                             &mut agent,
-                            &client,
                             context,
-                            &permission,
-                            &ask_tx,
-                            &question_tx,
-                            &plan_tx,
-                            &bg_store,
-                            &sandbox,
+                            &make_agent_build_deps!(),
                             &mut agent_rx,
                             &mut agent_abort,
                             &mut agent_interject,
                             &mut agent_cancel,
                             &interjection_queue,
-                            #[cfg(feature = "mcp")]
-                            mcp_manager.as_ref(),
-                            #[cfg(feature = "semantic")]
-                            semantic_manager,
-                            #[cfg(feature = "lsp")]
-                            lsp_manager.as_ref(),
                         ).await?;
                     }
                     AgentEvent::Error(e) => {
-                        was_reasoning = false;
-                        renderer.set_avatar_state(avatar::AvatarState::Error);
-                        #[cfg(feature = "experimental-ui-terminal-tab")]
-                        renderer.set_last_tool_name("");
-                        close_tool_chamber_if_open(&mut renderer, &mut last_tool_name, &mut tool_chamber_open)?;
-                        // dirge-ufe0: flush any trailing token the render
-                        // coalescer skipped (the Error event queued behind
-                        // the final tokens leaves them caught-up-but-
-                        // unpainted) before the error line is written, so
-                        // the streamed text stays on-screen above the error
-                        // (it is also persisted to the DB below).
-                        if !response_buf.is_empty() {
-                            render_agent_stream(
-                                &response_buf,
-                                &mut response_start_line,
-                                c_agent(),
-                                &mut renderer,
-                            )?;
-                            last_token_render = None;
-                        }
-                        let safe = sanitize_output(&e);
-                        renderer.write_line(&format!("error: {}", safe), c_error())?;
-
-                        // Persist partial turn (whatever was streamed before
-                        // the error) so it's searchable and the session has
-                        // a record of what went wrong.
-                        persist_turn_to_db(session, &last_user_prompt, &response_buf, &tool_calls_buf);
-
-                        #[cfg(feature = "plugin")]
-                        if let Some(pm) = plugin_manager {
-                            let mut mgr = pm.lock().unwrap_or_else(|err| err.into_inner());
-                            if let Err(dispatch_err) = mgr.dispatch(
-                                "on-error",
-                                &format!(
-                                    "@{{:error \"{}\"}}",
-                                    crate::plugin::escape_janet_string(&e)
-                                ),
-                            ) {
-                                renderer.write_line(
-                                    &format!("[plugin] on-error error: {dispatch_err}"),
-                                    c_error(),
-                                )?;
-                            }
-                        }
-
-                        is_running = false;
-                        if let Some(tx) = agent_cancel.take() {
-                            let _ = tx.try_send(());
-                        }
-                        if let Some(h) = agent_abort.take() { h.abort(); }
-                        agent_rx = None;
-                        agent_interject = None;
-                        agent_line_started = false;
-                        response_buf.clear();
-                        response_start_line = None;
-                        reasoning_buf.clear();
-                        reasoning_start_line = None;
-
-                        // Drop queued interjections — they were typed expecting
-                        // the running turn to succeed; replaying them blindly
-                        // after an error (e.g. context-length) would just
-                        // re-trigger it.
-                        let dropped = interjection_queue.lock().unwrap().len();
-                        interjection_queue.lock().unwrap().clear();
-                        if dropped > 0 {
-                            renderer.write_line(
-                                &format!(
-                                    "{} queued message{} dropped due to error",
-                                    dropped,
-                                    if dropped == 1 { "" } else { "s" }
-                                ),
-                                c_error(),
-                            )?;
-                        }
+                        let mut ctx = make_run_ctx!();
+                        run_handlers::handle_error(
+                            &mut ctx,
+                            e,
+                            &mut was_reasoning,
+                            &mut is_running,
+                            &mut last_token_render,
+                            &mut agent_rx,
+                            &mut agent_abort,
+                            &mut agent_interject,
+                            &mut agent_cancel,
+                            &interjection_queue,
+                            #[cfg(feature = "plugin")]
+                            plugin_manager,
+                        )
+                        .await?;
                     }
                     AgentEvent::TurnStart { index } => {
                         #[cfg(feature = "plugin")]
@@ -2362,7 +2302,9 @@ pub async fn run_interactive(
                     } => {
                         // IMPROVEMENTS_PLAN #5: surface what the pass did
                         // (prune-only / +summary / +failed-summary) so a
-                        // failing summarizer is visible in the logs.
+                        // failing summarizer is visible in the logs. Kept
+                        // inline because the handler doesn't need the
+                        // compaction_kind / summary_model fields.
                         tracing::debug!(
                             target: "dirge::ui::compaction",
                             kind = ?compaction_kind,
@@ -2371,205 +2313,56 @@ pub async fn run_interactive(
                             tokens_after,
                             "context compacted",
                         );
-                        // Persist session rotation to DB: end the old session
-                        // with reason "compression", insert the new session.
-                        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                        let paths = crate::extras::dirge_paths::ProjectPaths::new(&cwd);
-                        if let Ok(db) = crate::extras::session_db::SessionDb::open(
-                            &paths.session_db_path(),
-                        ) {
-                            let old_sid = format!(
-                                "dirge-{}",
-                                session
-                                    .id
-                                    .as_str()
-                                    .chars()
-                                    .take(8)
-                                    .collect::<String>()
-                            );
-                            let _ = db.end_session(&old_sid, "compression");
-                            let now = chrono::Utc::now().to_rfc3339();
-                            let _ = db.insert_session(
-                                new_session_id,
-                                "cli",
-                                &session.model,
-                                &session.provider,
-                                &now,
-                            );
-                            let _ = db.set_parent_session(new_session_id, &old_sid);
-                        }
-                        // SESS-2 follow-up #1: mutate the in-memory
-                        // Session to match the rotation and push a
-                        // Compaction entry, then persist to disk.
-                        // Without this the on-disk session file kept
-                        // the OLD id and the compaction was lost on
-                        // next resume. Mirrors Hermes
-                        // conversation_compression.py lines 380-397.
-                        let token_savings =
-                            tokens_before.saturating_sub(tokens_after);
-                        if !summary.is_empty() {
-                            session.compress_reporting(
-                                summary.to_string(),
-                                first_kept_index,
-                                token_savings,
-                            );
-                        }
-                        // dirge-hs61: capture the outgoing id, do
-                        // ALL the mutations (id rotation + disk
-                        // save), THEN fire the on_session_switch
-                        // hook. Pre-fix the hook fired in the
-                        // middle: DB rotated, messages drained, but
-                        // on-disk JSON still had the old id —
-                        // providers querying either store saw
-                        // inconsistent triple state.
-                        let parent_id = session.id.to_string();
-                        session.id = compact_str::CompactString::new(
-                            new_session_id.as_str(),
-                        );
-                        if let Err(e) =
-                            crate::session::storage::save_session(session)
-                        {
-                            tracing::warn!(
-                                target: "dirge::ui",
-                                error = %e,
-                                "could not persist rotated session after compaction",
-                            );
-                        }
-                        // dirge-g72y: rebuild the agent so
-                        // SessionSearchTool picks up the new id.
-                        // Pre-fix the tool was constructed with the
-                        // pre-rotation id and silently excluded the
-                        // wrong session — same bug class as the
-                        // dirge-502b regression that cmd_session.rs
-                        // already handles by rebuilding on swap.
-                        let model = client.completion_model(session.model.to_string());
-                        agent = crate::provider::build_agent(
-                            model,
-                            cli,
-                            cfg,
+                        let mut ctx = make_run_ctx!();
+                        run_handlers::handle_context_compacted(
+                            &mut ctx,
+                            &make_agent_build_deps!(),
+                            &mut agent,
                             context,
-                            permission.clone(),
-                            ask_tx.clone(),
-                            question_tx.clone(),
-                            plan_tx.clone(),
-                            bg_store.clone(),
-                            #[cfg(feature = "lsp")]
-                            lsp_manager.clone(),
-                            sandbox.clone(),
-                            #[cfg(feature = "mcp")]
-                            mcp_manager.as_ref(),
-                            #[cfg(feature = "semantic")]
-                            semantic_manager,
-                            Some(session.id.to_string()),
-                        )
-                        .await;
-                        // dirge-5gn6: fire on_session_switch only AFTER
-                        // everything is consistent: id rotated in
-                        // memory, JSON saved to disk under new id,
-                        // agent rebuilt. Providers can now query DB
-                        // or disk and see a coherent snapshot.
-                        // `reset=false` — compaction continues the
-                        // logical conversation.
-                        crate::agent::review::maybe_fire_session_switch(
-                            &agent,
                             new_session_id,
-                            &parent_id,
-                            /* reset = */ false,
-                        );
-                        renderer.write_line(
-                            &format!(
-                                "  context compacted: {} → {} tokens (session {})",
-                                tokens_before, tokens_after, new_session_id
-                            ),
-                            Color::DarkGrey,
-                        )?;
+                            tokens_before,
+                            tokens_after,
+                            summary,
+                            first_kept_index,
+                        )
+                        .await?;
                     }
                     AgentEvent::UserMessage { content } => {
-                        // The agent loop emits the literal prompt that
-                        // went to the LLM, which may have a
-                        // `<system-reminder>…</system-reminder>` block
-                        // prepended (from `prepend_pending_notifications`
-                        // when background tasks have just completed —
-                        // see src/agent/tools/background.rs:300). The
-                        // user's view should NOT show that wrapper —
-                        // they just see their own text and any visible
-                        // background-task notice the UI rendered
-                        // separately. Strip the leading reminder block
-                        // (and its trailing blank line) before
-                        // rendering. The on-disk session already stores
-                        // the clean `text` via the submit-path's
-                        // `session.add_message(User, &text)` call.
-                        let visible =
-                            strip_leading_system_reminder(&content);
-                        write_user_lines(&mut renderer, visible)?;
-                        renderer.write_line("", Color::White)?;
-                        // session.add_message handled at input time (line ~2119)
+                        run_handlers::notices::handle_user_message(&mut renderer, &content)?;
+                        // session.add_message handled at input time.
                     }
                     AgentEvent::EscalationActivated { provider, reason } => {
-                        // Phase 4 part 1: surface the dual-client
-                        // model swap as a single dim status line so
-                        // the user sees the unexpected provider
-                        // takeover (see docs/AGENTIC_LOOP_PLAN.md
-                        // "Risk + sequencing notes").
-                        let summary = reason.summary();
-                        renderer.write_line(
-                            &format!("  ↑ escalating to {provider} (next turn): {summary}"),
-                            theme::dim(),
+                        run_handlers::notices::handle_escalation_activated(
+                            &mut renderer,
+                            &provider,
+                            &reason,
                         )?;
                     }
                     AgentEvent::SystemNotice { content } => {
-                        // dirge-originated log line (e.g. the max-agent-turns
-                        // cap). Render as `<system>` in the warning color so
-                        // it's visibly distinct from the user's own `<you>`
-                        // messages and from agent output.
-                        write_system_lines(&mut renderer, &content)?;
-                        renderer.write_line("", Color::White)?;
+                        run_handlers::notices::handle_system_notice(&mut renderer, &content)?;
                     }
                     AgentEvent::RetryNotice {
                         attempt,
                         delay_ms,
                         error: _error,
                     } => {
-                        // PROV-2: surface a temporary banner so the
-                        // user isn't staring at silence during backoff.
+                        // `error` is intentionally unrendered today; bind +
+                        // discard so the field still counts as read (keeps
+                        // dead_code quiet under `-D warnings`).
                         let _ = _error;
-                        renderer.write_line(
-                            &format!(
-                                "  ⟳ retry {attempt} ({delay_ms}ms)…",
-                            ),
-                            theme::dim(),
+                        run_handlers::notices::handle_retry_notice(
+                            &mut renderer,
+                            attempt,
+                            delay_ms,
                         )?;
                     }
                     AgentEvent::RepairStats { snapshot } => {
-                        // Phase-1 telemetry. Only emitted when a
-                        // repair fired or an input was invalid,
-                        // so we don't need an `is_empty()` guard
-                        // here — but include it defensively.
+                        // Empty snapshots `continue` to skip the trailing
+                        // status redraw (defensive — they aren't emitted).
                         if snapshot.is_empty() {
                             continue;
                         }
-                        let mut parts: Vec<String> = Vec::new();
-                        if snapshot.md_link_unwrapped > 0 {
-                            parts.push(format!("{} md-link", snapshot.md_link_unwrapped));
-                        }
-                        if snapshot.null_stripped > 0 {
-                            parts.push(format!("{} null-strip", snapshot.null_stripped));
-                        }
-                        if snapshot.json_string_to_array > 0 {
-                            parts.push(format!("{} json-array", snapshot.json_string_to_array));
-                        }
-                        if snapshot.object_to_array > 0 {
-                            parts.push(format!("{} obj-to-array", snapshot.object_to_array));
-                        }
-                        if snapshot.bare_string_to_array > 0 {
-                            parts.push(format!("{} bare-to-array", snapshot.bare_string_to_array));
-                        }
-                        let total = snapshot.total_successful();
-                        let mut line = format!("  ⊕ repaired {total} input(s): {}", parts.join(", "));
-                        if snapshot.invalid > 0 {
-                            line.push_str(&format!("; {} invalid", snapshot.invalid));
-                        }
-                        renderer.write_line(&line, theme::dim())?;
+                        run_handlers::notices::handle_repair_stats(&mut renderer, &snapshot)?;
                     }
                 }
                 renderer.draw_bottom(
