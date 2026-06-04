@@ -143,6 +143,27 @@ impl BackgroundShellStore {
     /// `JoinHandle` would otherwise leak it).
     pub fn register(&self, id: String, command: String) {
         let mut map = self.lock();
+        Self::insert_locked(&mut map, id, command);
+    }
+
+    /// Register a shell ONLY if fewer than [`MAX_CONCURRENT_SHELLS`] are
+    /// currently running — the count and the insert happen under a single
+    /// lock so there's no check-then-act race (dirge-jyng: the bash tool
+    /// previously did `running_count()` then `register()` as two separate
+    /// lock acquisitions, so two concurrent launches could both pass the
+    /// cap check). Returns `false` (registering nothing) when the cap is hit.
+    pub fn try_register(&self, id: String, command: String) -> bool {
+        let mut map = self.lock();
+        let running = map.values().filter(|e| e.status.is_running()).count();
+        if running >= MAX_CONCURRENT_SHELLS {
+            return false;
+        }
+        Self::insert_locked(&mut map, id, command);
+        true
+    }
+
+    /// Shared insert + STORE_CAPACITY eviction, performed under a held lock.
+    fn insert_locked(map: &mut IndexMap<String, ShellEntry>, id: String, command: String) {
         if !map.contains_key(&id) && map.len() >= STORE_CAPACITY {
             // Prefer evicting the oldest finished shell.
             let victim = map
@@ -422,6 +443,27 @@ mod tests {
     fn read_new_unknown_id_is_none() {
         let s = BackgroundShellStore::new();
         assert!(s.read_new("nope").is_none());
+    }
+
+    /// dirge-jyng: try_register enforces MAX_CONCURRENT_SHELLS atomically
+    /// (rejects once the running cap is hit) and frees a slot when a shell
+    /// finishes.
+    #[test]
+    fn try_register_enforces_running_cap() {
+        let s = BackgroundShellStore::new();
+        for n in 0..MAX_CONCURRENT_SHELLS {
+            assert!(
+                s.try_register(format!("s{n}"), "x".into()),
+                "registration {n} within cap must succeed"
+            );
+        }
+        assert_eq!(s.running_count(), MAX_CONCURRENT_SHELLS);
+        // One past the cap is rejected and registers nothing.
+        assert!(!s.try_register("over".into(), "x".into()));
+        assert!(s.read_new("over").is_none());
+        // Finishing one frees a running slot → next registration succeeds.
+        s.finish("s0", ShellStatus::Exited(0));
+        assert!(s.try_register("after".into(), "x".into()));
     }
 
     #[test]

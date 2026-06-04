@@ -480,44 +480,20 @@ pub(super) async fn cmd_allow(
             let mut it = rest.splitn(2, char::is_whitespace);
             let tool = it.next().unwrap_or("");
             let pattern = it.next().unwrap_or("").trim();
-            const KNOWN_PERM_TOOLS: &[&str] = &[
-                "bash",
-                "read",
-                "write",
-                "edit",
-                "grep",
-                "find_files",
-                "glob",
-                "list_dir",
-                "write_todo_list",
-                "apply_patch",
-                "lsp",
-                "question",
-                "webfetch",
-                "websearch",
-                "task",
-                "task_status",
-                "memory",
-                "skill",
-                "list_symbols",
-                "get_symbol_body",
-                "find_definition",
-                "find_callers",
-                "find_callees",
-                "mcp_tool",
-            ];
+            // dirge-jyng: validate against the single source of truth
+            // (BUILTIN_TOOL_NAMES) instead of a hand-kept copy that had
+            // drifted (it was missing read_minified/edit_minified/
+            // bash_output/kill_shell/tool_search/session_search/
+            // repo_overview/plan_enter/plan_exit/plugin_tool).
+            let known = crate::agent::tools::BUILTIN_TOOL_NAMES;
             if tool.is_empty() || pattern.is_empty() {
                 ctx.renderer.write_line(
                     "usage: /allow add <tool> <pattern>  (e.g. /allow add bash 'cargo *')",
                     c_error(),
                 )?;
-            } else if !KNOWN_PERM_TOOLS.contains(&tool) {
+            } else if !known.contains(&tool) {
                 ctx.renderer.write_line(
-                    &format!(
-                        "unknown tool {:?}. Valid: {}",
-                        tool,
-                        KNOWN_PERM_TOOLS.join(", "),
-                    ),
+                    &format!("unknown tool {:?}. Valid: {}", tool, known.join(", ")),
                     c_error(),
                 )?;
             } else {

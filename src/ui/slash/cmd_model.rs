@@ -138,9 +138,22 @@ pub(super) async fn cmd_mode(ctx: &mut SlashCtx<'_>, parts: &[&str]) -> anyhow::
             }
             "yolo" => {
                 if let Some(p) = ctx.permission {
+                    // dirge-jyng: surface the audit-H11 implication on the
+                    // RUNTIME switch too (startup already warns in main.rs):
+                    // Yolo allows every call BEFORE rule lookup, so configured
+                    // deny rules go inert. Read the count before flipping.
+                    let deny_n = p.lock_ignore_poison().deny_rule_count();
                     p.lock_ignore_poison().set_mode(SecurityMode::Yolo);
                     ctx.renderer
                         .write_line("security mode: YOLO (all operations allowed)", c_agent())?;
+                    if deny_n > 0 {
+                        ctx.renderer.write_line(
+                            &format!(
+                                "warning: your config has {deny_n} deny rule(s) — Yolo IGNORES them. Switch back with /mode standard to honor deny rules.",
+                            ),
+                            c_error(),
+                        )?;
+                    }
                 } else {
                     ctx.renderer
                         .write_line("permission system not active", c_error())?;

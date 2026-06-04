@@ -123,15 +123,15 @@ impl Tool for BashTool {
             {
                 return Err(ToolError::Msg("timeout must be > 0".to_string()));
             }
-            let running = store.running_count();
             let cap = BackgroundShellStore::max_concurrent();
-            if running >= cap {
+            let id = uuid::Uuid::new_v4().to_string();
+            // dirge-jyng: atomic cap-check + register under one lock (no
+            // check-then-act race between concurrent launches).
+            if !store.try_register(id.clone(), command.clone()) {
                 return Err(ToolError::Msg(format!(
-                    "background shell cap reached ({running}/{cap} running). Stop one with kill_shell, or run inline (background=false).",
+                    "background shell cap reached ({cap} running). Stop one with kill_shell, or run inline (background=false).",
                 )));
             }
-            let id = uuid::Uuid::new_v4().to_string();
-            store.register(id.clone(), command.clone());
             // A backgrounded command may mutate the filesystem while it
             // runs; conservatively drop the per-turn read/grep/list cache.
             if let Some(ref cache) = self.cache {
