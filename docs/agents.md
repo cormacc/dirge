@@ -133,7 +133,9 @@ The subagent then runs on the profile's **model** and **system prompt**, so you
 can fan work out to specialized personas (a cheap fast reviewer, a stronger
 planner) from a single session. Omitting `agent` uses the default subagent,
 exactly as before — the parameter only appears when profiles exist, and naming a
-profile that isn't defined is a hard error (no silent fallback).
+profile that isn't defined is a hard error (no silent fallback). The default
+subagent (no `agent=`) runs on `subagent_provider`'s model when that role key is
+configured, otherwise the main model.
 
 Profiles are resolved into subagent routes once at startup. Two current limits:
 subagents are **tool-less** (a profile's `deny_tools`/`allow_tools` doesn't

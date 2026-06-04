@@ -69,6 +69,14 @@ pub async fn build_agent(
     // can plumb it through to the `tool_input_repair` telemetry.
     let model_name = parent_model.name();
 
+    // dirge-nw25: the model `task`-spawned subagents default to. When
+    // `subagent_provider` is configured (and differs from the default
+    // route) this is its model; otherwise the main model. Only the
+    // `TaskTool` in `build_loop_tools` consumes `parent_model`, so routing
+    // here is sufficient. A `task(agent=…)` profile model still overrides.
+    let subagent_model = resolve_subagent_model(cfg);
+    let loop_task_model = subagent_model.unwrap_or_else(|| parent_model.clone());
+
     macro_rules! build_inner {
         ($m:expr, $variant:ident) => {{
             // Clone params before consuming them in
@@ -81,7 +89,9 @@ pub async fn build_agent(
             let plan_tx_for_loop = plan_tx.clone();
             let bg_store_for_loop = bg_store.clone();
             let sandbox_for_loop = sandbox.clone();
-            let parent_model_for_loop = Some(parent_model.clone());
+            // dirge-nw25: the loop's TaskTool gets the subagent-routed model
+            // (subagent_provider when set, else the main model).
+            let parent_model_for_loop = Some(loop_task_model.clone());
             #[cfg(feature = "lsp")]
             let lsp_for_loop = lsp_manager.clone();
 
@@ -172,21 +182,15 @@ pub async fn build_agent(
         AnyModel::Custom(m) => build_inner!(m, Custom),
     };
 
-    // dirge-008x: wire the in-loop LLM compaction summarizer. The
-    // proactive folds in `run_agent_loop` need a `SummarizeFn` to call a
-    // model; without one they degrade to a prune-only pass (the bug:
-    // `summarize_fn` was declared and threaded but never set, so
-    // automatic structured-summary compaction never happened). Built from
-    // the main model — a dedicated `summarization_provider` route is the
-    // separate dirge-nw25. The closure adapts `summarize_with_model`
-    // (AnyModel + prompt → summary) to the `SummarizeFn` shape.
+    // dirge-008x + dirge-nw25: wire the in-loop LLM compaction summarizer.
+    // The proactive folds in `run_agent_loop` need a `SummarizeFn` to call
+    // a model; without one they degrade to a prune-only pass. Prefer the
+    // configured `summarization_provider` (so that role key is actually
+    // consumed, not just advertised); otherwise fall back to the main
+    // model. Either way adapts `summarize_with_model` (AnyModel + prompt →
+    // summary) to the `SummarizeFn` shape.
     {
-        let summ_model = parent_model.clone();
-        let summarize_fn: crate::agent::compression::SummarizeFn =
-            std::sync::Arc::new(move |prompt: String| {
-                let m = summ_model.clone();
-                Box::pin(async move { summarize::summarize_with_model(m, prompt).await })
-            });
+        let summarize_fn = build_summarize_fn(cfg, parent_model.clone());
         agent = agent.with_summarizer(summarize_fn);
     }
 
@@ -470,6 +474,98 @@ fn build_critic_fn(
     }))
 }
 
+/// dirge-008x + dirge-nw25: build the in-loop compaction summarizer.
+///
+/// When `summarization_provider` is configured AND resolves to a
+/// DIFFERENT alias than the default role, build a dedicated client/model
+/// for it (so a cheaper/faster summarizer can be pointed at compaction);
+/// otherwise reuse the main agent `model`. The returned `SummarizeFn`
+/// runs one tool-less completion per fold via `summarize_with_model`.
+/// Resolution failure for an explicitly-configured provider falls back to
+/// the main model with a stderr warning rather than disabling compaction.
+fn build_summarize_fn(
+    cfg: &Config,
+    main_model: AnyModel,
+) -> crate::agent::compression::SummarizeFn {
+    let from_model = |model: AnyModel| -> crate::agent::compression::SummarizeFn {
+        std::sync::Arc::new(move |prompt: String| {
+            let m = model.clone();
+            Box::pin(async move { summarize::summarize_with_model(m, prompt).await })
+        })
+    };
+
+    // Only build a separate client when the user explicitly set
+    // `summarization_provider` AND it differs from the default route.
+    if cfg.summarization_provider.is_some() {
+        let default_role = cfg.resolve_role(crate::config::ConfigRole::Default);
+        let summ_role = cfg.resolve_role(crate::config::ConfigRole::Summarization);
+        if let (Some((default_alias, _)), Some((alias, entry))) = (default_role, summ_role)
+            && !default_alias.eq_ignore_ascii_case(&alias)
+        {
+            match create_client(&alias, None, &cfg.providers_map()) {
+                Ok(client) => {
+                    let model_name = entry
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| default_model_for_entry(&alias, &entry).to_string());
+                    let model = client.completion_model(model_name);
+                    tracing::info!(
+                        target: "dirge::provider",
+                        alias = %alias,
+                        "summarization_provider active for in-loop compaction",
+                    );
+                    return from_model(model);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: summarization_provider '{alias}' failed to build ({e}); \
+                         falling back to the main model for compaction"
+                    );
+                }
+            }
+        }
+    }
+    from_model(main_model)
+}
+
+/// dirge-nw25: resolve the model that `task`-spawned subagents default to,
+/// from `subagent_provider`. Returns `Some(model)` only when the key is
+/// explicitly set AND resolves to a DIFFERENT alias than the default
+/// route; otherwise `None` (the caller keeps the main model). A profile
+/// route on a specific `task(agent=…)` call still overrides this — it is
+/// the fallback default, matching `task.rs`'s `route_model.unwrap_or`.
+fn resolve_subagent_model(cfg: &Config) -> Option<AnyModel> {
+    if cfg.subagent_provider.is_none() {
+        return None;
+    }
+    let (default_alias, _) = cfg.resolve_role(crate::config::ConfigRole::Default)?;
+    let (alias, entry) = cfg.resolve_role(crate::config::ConfigRole::Subagent)?;
+    if default_alias.eq_ignore_ascii_case(&alias) {
+        return None;
+    }
+    match create_client(&alias, None, &cfg.providers_map()) {
+        Ok(client) => {
+            let model_name = entry
+                .model
+                .clone()
+                .unwrap_or_else(|| default_model_for_entry(&alias, &entry).to_string());
+            tracing::info!(
+                target: "dirge::provider",
+                alias = %alias,
+                "subagent_provider active for task-spawned subagents",
+            );
+            Some(client.completion_model(model_name))
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: subagent_provider '{alias}' failed to build ({e}); \
+                 falling back to the main model for subagents"
+            );
+            None
+        }
+    }
+}
+
 /// dirge-0g6i: build the LLM auto-approval evaluator from a resolved
 /// `approval_provider`. Mirrors [`build_critic_fn`] — same client + model
 /// resolution and the SAME shared one-shot helper
@@ -541,4 +637,24 @@ fn build_review_stream_fn(
         .collect();
     let stream_fn = model.build_stream_fn(tool_defs, chunk_timeout, Some(alias.to_string()));
     Ok((stream_fn, model_name))
+}
+
+#[cfg(test)]
+mod nw25_tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// dirge-nw25: with no `subagent_provider` configured, the resolver
+    /// returns `None` (so no extra client is built and the task tool keeps
+    /// the main model). Guards the "don't touch unset config" path; the
+    /// configured-and-different path mirrors the tested `build_critic_fn`.
+    #[test]
+    fn resolve_subagent_model_none_when_unset() {
+        let cfg = Config::default();
+        assert!(cfg.subagent_provider.is_none());
+        assert!(
+            resolve_subagent_model(&cfg).is_none(),
+            "unset subagent_provider must yield no override model"
+        );
+    }
 }
