@@ -16,8 +16,22 @@
 //!   cpus:            number of vCPUs
 //!   memory_mib:      RAM in MiB
 
+// libkrun is a Linux/KVM-only library; on any other platform the runner
+// can't be built or run. Compile a clear stub instead of dangling
+// references to undefined `krun_*` symbols at link time.
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!(
+        "dirge-microvm-runner: the microVM sandbox is only supported on Linux \
+         (requires KVM and libkrun)."
+    );
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 
+#[cfg(target_os = "linux")]
 fn main() {
     let config_json = std::env::args()
         .nth(1)
@@ -104,6 +118,7 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn to_cstr(s: &str) -> CString {
     CString::new(s).unwrap_or_else(|_| CString::new("").unwrap())
 }

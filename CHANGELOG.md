@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- The `sandbox-microvm` feature now compiles on non-Linux hosts. The reflink
+  fast path (`copy_file_range`) and the `dirge-microvm-runner` libkrun calls
+  are Linux-only and were ungated, so `--features sandbox-microvm` (and
+  `--all-features`) failed to build on macOS. They're now `cfg(target_os =
+  "linux")`-gated, with a `std::fs::copy` fallback for file copies and a
+  clear "Linux-only" stub for the runner. The sandbox itself still requires
+  Linux + KVM at runtime; this only fixes the cross-platform build.
+
 ## [0.4.0] - 2026-06-08
 
 ### Added

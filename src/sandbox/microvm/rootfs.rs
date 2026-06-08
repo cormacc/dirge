@@ -4,6 +4,7 @@
 //! image reference, and clones the cached rootfs for each VM session.
 
 use std::io;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -324,6 +325,10 @@ pub fn local_variant_name(image_ref: &str) -> Option<&str> {
 /// creates a CoW clone — instant and space-efficient. Falls back to a
 /// full data copy when reflinks aren't available (different filesystem,
 /// unsupported by the OS, etc.).
+///
+/// `copy_file_range` is a Linux syscall (absent from `libc` on macOS/BSD),
+/// so this fast path is Linux-only; see the non-Linux fallback below.
+#[cfg(target_os = "linux")]
 fn copy_file_reflink(src: &Path, dst: &Path) -> io::Result<u64> {
     use std::fs::OpenOptions;
 
@@ -381,6 +386,13 @@ fn copy_file_reflink(src: &Path, dst: &Path) -> io::Result<u64> {
     }
 
     Ok(total_written)
+}
+
+/// Non-Linux fallback: `copy_file_range` doesn't exist here. Report
+/// "unsupported" (`ENOSYS`) so [`cp_r`] takes its `std::fs::copy` path.
+#[cfg(not(target_os = "linux"))]
+fn copy_file_reflink(_src: &Path, _dst: &Path) -> io::Result<u64> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
 /// Copy a directory tree (like `cp -a`).
@@ -519,6 +531,10 @@ mod tests {
         );
     }
 
+    // The reflink fast path is Linux-only (copy_file_range); off-Linux
+    // copy_file_reflink is a stub that always reports ENOSYS so cp_r falls
+    // back to std::fs::copy. These two exercise the real syscall.
+    #[cfg(target_os = "linux")]
     #[test]
     fn copy_file_reflink_copies_content() {
         let dir = std::env::temp_dir().join("dirge-test-reflink-content");
@@ -539,6 +555,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn copy_file_reflink_empty_file() {
         let dir = std::env::temp_dir().join("dirge-test-reflink-empty");
