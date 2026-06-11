@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-11
+
+### Fixed
+- **Headless `--session` now persists the full assistant turn.** `dirge -p
+  --session <id>` saved only the assistant's final text, dropping every tool
+  call and result — so a resumed session (notably an MCP delegation
+  follow-up) lost the substance of prior work, and a tool-heavy final turn
+  (which often has little trailing text) saved a thin/empty message that read
+  as a cut-off end. The turn's tool calls are now saved too, so
+  `convert_history` re-emits the `tool_use`/`tool_result` blocks on resume.
+- **mermaid_diagram plugin: validation gaps.** The diagram edge check rejected
+  valid `er`/`class`/`state` diagrams (and flowchart `-.->`/`==>`); broadened
+  the connector match. Added a `{}`-balance check for `{decision}`/`{{hexagon}}`
+  nodes, and dropped a stray `[` from an error message.
+
 ## [0.6.0] - 2026-06-11
 
 ### Added
