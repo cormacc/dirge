@@ -111,6 +111,10 @@ dirge --session my-refactor
 # Browse and pick a session interactively
 dirge -r
 
+# Run dirge as an MCP server so another agent can delegate tasks to it
+# (register with `claude mcp add dirge -- dirge mcp`). See docs/mcp-server.md
+dirge mcp
+
 # Explicit provider/model
 dirge --provider openrouter --model openai/gpt-4o
 
