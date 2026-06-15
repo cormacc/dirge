@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-15
+
+### Added
+- **Spec-driven workflow tracker (SQLite-backed).** A dirge-native take on
+  spec-driven development: align on what to build before writing how, tracked
+  as rows in the per-project DB rather than a markdown-folder tree. Living
+  specs (capability → requirement → scenario) are the current truth; a change
+  carries requirement deltas plus a task checklist, and archiving folds the
+  deltas into the living specs in one transaction. Real task status as a
+  column, queryable specs, no silent parse failures. Exposed via the `spec`
+  agent tool and a bundled spec-driven-workflow skill.
+- **`/spec` command.** Read-only view of the tracker: list changes, show one
+  change (proposal + deltas + tasks), and read living specs
+  (`/spec specs [capability]`).
+- **Active-change context injection.** The active change (why/what/design +
+  recorded deltas + task status) is rendered into the agent preamble at build
+  time, so a resumed or fresh session knows what it's implementing and where
+  it left off without querying the tool.
+- **Archive forms a memory.** Archiving a change folds its rationale and
+  design decisions into durable project memory, so the reasoning outlives the
+  change record.
+
+### Fixed
+- **Session resume restores the TODOS and MODIFIED panels.** The todo list and
+  modified-files set live in process-global state that isn't part of the
+  session schema, so resuming a session (`--session`) or switching with
+  `/sessions` replayed the conversation but left those panels blank until the
+  agent ran again. They're now reconstructed by replaying the session's
+  recorded tool calls. `/clear` also now clears the todo list, not just the
+  modified-files set.
+
 ## [0.6.5] - 2026-06-15
 
 ### Added
