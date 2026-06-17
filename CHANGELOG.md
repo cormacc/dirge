@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-06-17
+
+### Changed
+- **Edit tools auto-close an unbalanced delimiter instead of bouncing it
+  back.** A truncated tool-call JSON argument was already repaired
+  mechanically, but an unbalanced `()`/`[]`/`{}` in code the model wrote was
+  only detected and the edit rejected — costing a model round-trip for a
+  mechanical fix. Now `write`, `edit`, `edit_lines`, `apply_patch`, and
+  `edit_minified` mechanically close a purely-unclosed delimiter imbalance and
+  report the fix on the result (`[auto-repair] …`), the same way the JSON
+  repair does. Safe by construction: only for languages whose comments/strings
+  are understood (so a delimiter inside a string or comment is never
+  miscounted), never for a stray/mismatched closer, and only when the closed
+  result actually re-parses — tree-sitter is the oracle that rejects a nonsense
+  close. A genuinely broken edit still gets the precise "the `(` at line N is
+  never closed" rejection. All edit tools now share one pre-write gate.
+
 ## [0.7.4] - 2026-06-17
 
 ### Fixed
