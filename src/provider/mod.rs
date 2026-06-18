@@ -2,6 +2,7 @@ pub(crate) mod auth;
 mod build;
 pub mod client;
 pub(crate) mod anthropic_http;
+pub(crate) mod anthropic_oauth;
 pub(crate) mod codex_http;
 mod dispatch;
 mod resolve;
