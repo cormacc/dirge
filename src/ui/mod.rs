@@ -1701,6 +1701,13 @@ pub async fn run_interactive(
                                     &mut ui.tool_calls_this_run,
                                 );
                             }
+                            // dirge #448 finding 3: the expansion anchor's
+                            // indices point into the OLD chat's buffer (it isn't
+                            // part of ChatUiState), so a switch invalidates them.
+                            // Clear so a background agent's reasoning delta can't
+                            // restream against the now-active chat's buffer.
+                            ui.expansion_anchor = None;
+                            ui.live_thinking_expanded = false;
                             renderer.request_repaint();
                             continue;
                         }
@@ -2391,7 +2398,18 @@ pub async fn run_interactive(
                             // dirge #444: if the user expanded this live thinking
                             // with Ctrl+O, stream new deltas into the expanded
                             // block IN PLACE instead of leaving a frozen snapshot.
-                            if ui.live_thinking_expanded
+                            //
+                            // dirge-8p79: a full re-render of the whole buffer on
+                            // EVERY delta is O(n^2) over a burst. Coalesce like the
+                            // token coalescer (dirge-ufe0): skip while more reasoning
+                            // events are still queued and render once they've drained.
+                            // The trailing burst before a Token/ToolCall boundary is
+                            // flushed there (see `freeze_live_thinking`) so the frozen
+                            // block is never left stale.
+                            let caught_up =
+                                ui.agent_rx.as_ref().map_or(0, |rx| rx.len()) == 0;
+                            if caught_up
+                                && ui.live_thinking_expanded
                                 && let Some(anchor) = ui.expansion_anchor
                             {
                                 match restream_expanded_thinking(
@@ -2415,9 +2433,19 @@ pub async fn run_interactive(
                         // panel so an interleaved later reasoning delta can't
                         // re-render at the (now-buried) anchor and clobber the
                         // response. The block stays as collapsible history.
-                        if ui.was_reasoning {
-                            ui.live_thinking_expanded = false;
-                        }
+                        // dirge #448 finding 4: clear unconditionally — a Token
+                        // arriving when was_reasoning is already false (e.g.
+                        // response tokens after a tool round-trip) must still
+                        // drop the flag, otherwise it stays live.
+                        // dirge-8p79: flush any deltas the coalescer skipped first,
+                        // so the block freezes complete (handle_token below renders
+                        // the response under it via end_reasoning).
+                        freeze_live_thinking(
+                            &mut renderer,
+                            &mut ui.expansion_anchor,
+                            &mut ui.live_thinking_expanded,
+                            &ui.reasoning_buf,
+                        )?;
                         // Caught-up check for the render coalescer, computed
                         // before ctx borrows the render state (dirge-ufe0).
                         let pending = ui.agent_rx.as_ref().map_or(0, |rx| rx.len());
@@ -2439,6 +2467,16 @@ pub async fn run_interactive(
                         )?;
                     }
                     AgentEvent::ToolCall { id, name, args } => {
+                        // dirge-8p79: a reasoning burst can go straight to a tool
+                        // call with no intervening Token. Flush any coalesced
+                        // deltas into the expanded block before it freezes, and
+                        // stop tracking (the tool chamber renders below it).
+                        freeze_live_thinking(
+                            &mut renderer,
+                            &mut ui.expansion_anchor,
+                            &mut ui.live_thinking_expanded,
+                            &ui.reasoning_buf,
+                        )?;
                         let mut ctx = make_run_ctx!();
                         run_handlers::handle_tool_call(
                             &mut ctx,
@@ -3639,42 +3677,76 @@ fn render_question_options(
 /// Append a thinking burst as a plain, color-reset block (no markdown
 /// stream → no style bleed) for the Ctrl+O expand toggle. Used for both the
 /// live in-flight buffer and a retained completed burst.
+/// Renders the `╭─ thinking ─` / `│` / `╰─` block for `text`. `text` must
+/// already be sanitized — every caller passes `reasoning_buf` / `last_thinking`,
+/// both filled via `sanitize_output` at push time (mod.rs / streaming.rs), so
+/// re-sanitizing per line here would be redundant work (dirge-8p79), compounded
+/// by the per-delta re-render in `restream_expanded_thinking`.
 fn render_thinking_block(renderer: &mut Renderer, text: &str) -> std::io::Result<()> {
     renderer.write_line("  ╭─ thinking ─", crate::ui::theme::thinking())?;
     for line in text.lines() {
-        renderer.write_line(
-            &format!("  │ {}", sanitize_output(line)),
-            crate::ui::theme::thinking(),
-        )?;
+        renderer.write_line(&format!("  │ {}", line), crate::ui::theme::thinking())?;
     }
     renderer.write_line("  ╰─", crate::ui::theme::thinking())?;
     renderer.write_line("", Color::White)?;
     Ok(())
 }
 
+/// dirge-8p79: freeze the expanded live-thinking block at a burst boundary
+/// (first response Token / ToolCall). Because the per-delta restream is
+/// coalesced, the last few deltas of a burst may not have been painted yet;
+/// this flushes the full `reasoning_buf` into the block one final time so it
+/// freezes complete, then stops live tracking. No-op when nothing is being
+/// tracked. Borrows the three `UiState` fields individually so the caller can
+/// pass them alongside an immutable `reasoning_buf` borrow.
+fn freeze_live_thinking(
+    renderer: &mut Renderer,
+    expansion_anchor: &mut Option<(usize, usize, u64)>,
+    live_thinking_expanded: &mut bool,
+    reasoning_buf: &str,
+) -> std::io::Result<()> {
+    if *live_thinking_expanded {
+        if let Some(anchor) = *expansion_anchor {
+            *expansion_anchor = restream_expanded_thinking(renderer, anchor, reasoning_buf)?;
+        }
+        *live_thinking_expanded = false;
+    }
+    Ok(())
+}
+
 /// dirge #444: re-render the expanded LIVE-thinking block in place with the
 /// latest `reasoning_buf`, so new reasoning deltas stream into the panel
-/// instead of leaving a frozen snapshot. `anchor` is `(start, _end,
+/// instead of leaving a frozen snapshot. `anchor` is `(start, end,
 /// eviction_gen)` from `expansion_anchor`. Returns the UPDATED anchor, or
 /// `None` when the block can't be re-rendered in place — front-eviction shifted
-/// indices (gen mismatch), or the start is past the buffer end — in which case
-/// the caller stops tracking and leaves the block as history (Ctrl+O re-expands
-/// a fresh snapshot). Assumes the block sits at the buffer tail, which holds
-/// during a pure thinking burst where nothing else appends.
+/// indices (gen mismatch), the start is past the buffer end, or the block is no
+/// longer at the buffer tail (`end != buffer_len`, i.e. content was appended
+/// below it) — in which case the caller stops tracking and leaves the block as
+/// history (Ctrl+O re-expands a fresh snapshot). The tail check is what makes a
+/// buried anchor a safe no-op rather than a destructive truncate.
 fn restream_expanded_thinking(
     renderer: &mut Renderer,
     anchor: (usize, usize, u64),
     reasoning_buf: &str,
 ) -> std::io::Result<Option<(usize, usize, u64)>> {
-    let (start, _end, anchor_gen) = anchor;
-    if renderer.eviction_generation() != anchor_gen || start > renderer.buffer_len() {
+    let (start, end, anchor_gen) = anchor;
+    // dirge #448 finding 1: `replace_from(start, [])` truncates from `start` to
+    // the END of the buffer, so re-rendering is only safe when the block still
+    // sits at the tail. If anything was appended below it (`end` no longer the
+    // buffer length), bail so that content isn't silently destroyed.
+    if renderer.eviction_generation() != anchor_gen
+        || start > renderer.buffer_len()
+        || end != renderer.buffer_len()
+    {
         return Ok(None);
     }
-    let gen_before = renderer.eviction_generation();
     renderer.replace_from(start, Vec::new());
     render_thinking_block(renderer, reasoning_buf)?;
-    Ok(if renderer.eviction_generation() == gen_before {
-        Some((start, renderer.buffer_len(), gen_before))
+    // The early return above already established `eviction_generation() ==
+    // anchor_gen`; if the render itself tripped front-eviction, the generation
+    // now differs and we stop tracking.
+    Ok(if renderer.eviction_generation() == anchor_gen {
+        Some((start, renderer.buffer_len(), anchor_gen))
     } else {
         None
     })
