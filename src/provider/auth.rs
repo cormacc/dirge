@@ -138,13 +138,21 @@ fn resolve_anthropic_auth_from(
         )
     })?;
 
-    let bearer_token = extract_string_by_keys(&json, &["accessToken", "access_token"])
+    let mut bearer_token = extract_string_by_keys(&json, &["accessToken", "access_token"])
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Anthropic OAuth requested, but no access token was found in {}. Run `claude login` again or set ANTHROPIC_OAUTH_TOKEN.",
+                "Anthropic OAuth requested, but no access token was found in {}. Run `dirge auth anthropic` again or set ANTHROPIC_OAUTH_TOKEN.",
                 credentials_file_path.display()
             )
         })?;
+
+    if anthropic_token_is_expired(&json)
+        && let Some(refresh) = extract_string_by_keys(&json, &["refreshToken", "refresh_token"])
+    {
+        let refreshed = refresh_anthropic_token_sync(&refresh)?;
+        crate::provider::anthropic_oauth::persist_credentials(&refreshed)?;
+        bearer_token = refreshed.access_token;
+    }
 
     Ok(ProviderAuthHeaders {
         bearer_token,
@@ -153,10 +161,48 @@ fn resolve_anthropic_auth_from(
 }
 
 fn anthropic_credentials_file_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join(".credentials.json")
+    crate::provider::anthropic_oauth::credentials_file_path()
+}
+
+fn anthropic_token_is_expired(value: &serde_json::Value) -> bool {
+    let Some(expires_at) = extract_i64_by_keys(value, &["expiresAt", "expires_at", "expires"]) else {
+        return false;
+    };
+    expires_at <= chrono::Utc::now().timestamp_millis()
+}
+
+fn refresh_anthropic_token_sync(
+    refresh_token: &str,
+) -> anyhow::Result<crate::provider::anthropic_oauth::AnthropicOAuthCredentials> {
+    let refresh_token = refresh_token.to_string();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(crate::provider::anthropic_oauth::refresh_token(&refresh_token))
+    })
+    .join()
+    .map_err(|panic| anyhow::anyhow!("Anthropic OAuth refresh thread panicked: {panic:?}"))?
+}
+
+fn extract_i64_by_keys(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    if let serde_json::Value::Object(map) = value {
+        for key in keys {
+            if let Some(n) = map.get(*key).and_then(serde_json::Value::as_i64) {
+                return Some(n);
+            }
+        }
+        for child in map.values() {
+            if let Some(n) = extract_i64_by_keys(child, keys) {
+                return Some(n);
+            }
+        }
+    } else if let serde_json::Value::Array(items) = value {
+        for child in items {
+            if let Some(n) = extract_i64_by_keys(child, keys) {
+                return Some(n);
+            }
+        }
+    }
+    None
 }
 
 fn extract_string_by_keys(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -247,6 +293,18 @@ mod tests {
 
         assert_eq!(headers.bearer_token, "oat-env-token");
         assert_eq!(headers.chatgpt_account_id, None);
+    }
+
+    #[test]
+    fn anthropic_refresh_sync_does_not_panic_on_current_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let result = std::panic::catch_unwind(|| refresh_anthropic_token_sync("invalid-refresh-token"));
+            assert!(result.is_ok(), "refresh entrypoint must not panic on current_thread runtime");
+        });
     }
 
     #[test]
