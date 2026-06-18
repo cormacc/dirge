@@ -165,7 +165,8 @@ fn anthropic_credentials_file_path() -> PathBuf {
 }
 
 fn anthropic_token_is_expired(value: &serde_json::Value) -> bool {
-    let Some(expires_at) = extract_i64_by_keys(value, &["expiresAt", "expires_at", "expires"]) else {
+    let Some(expires_at) = extract_i64_by_keys(value, &["expiresAt", "expires_at", "expires"])
+    else {
         return false;
     };
     expires_at <= chrono::Utc::now().timestamp_millis()
@@ -177,7 +178,9 @@ fn refresh_anthropic_token_sync(
     let refresh_token = refresh_token.to_string();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(crate::provider::anthropic_oauth::refresh_token(&refresh_token))
+        runtime.block_on(crate::provider::anthropic_oauth::refresh_token(
+            &refresh_token,
+        ))
     })
     .join()
     .map_err(|panic| anyhow::anyhow!("Anthropic OAuth refresh thread panicked: {panic:?}"))?
@@ -302,8 +305,12 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let result = std::panic::catch_unwind(|| refresh_anthropic_token_sync("invalid-refresh-token"));
-            assert!(result.is_ok(), "refresh entrypoint must not panic on current_thread runtime");
+            let result =
+                std::panic::catch_unwind(|| refresh_anthropic_token_sync("invalid-refresh-token"));
+            assert!(
+                result.is_ok(),
+                "refresh entrypoint must not panic on current_thread runtime"
+            );
         });
     }
 

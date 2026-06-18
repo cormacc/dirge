@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
+use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::net::TcpListener;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -85,7 +85,9 @@ pub(crate) async fn login_and_persist() -> anyhow::Result<PathBuf> {
 }
 
 #[allow(dead_code)]
-pub(crate) async fn refresh_token(refresh_token: &str) -> anyhow::Result<AnthropicOAuthCredentials> {
+pub(crate) async fn refresh_token(
+    refresh_token: &str,
+) -> anyhow::Result<AnthropicOAuthCredentials> {
     let response = reqwest::Client::new()
         .post(TOKEN_URL)
         .json(&serde_json::json!({
@@ -130,7 +132,9 @@ fn credentials_from_token(token: TokenResponse) -> AnthropicOAuthCredentials {
     }
 }
 
-pub(crate) fn persist_credentials(credentials: &AnthropicOAuthCredentials) -> anyhow::Result<PathBuf> {
+pub(crate) fn persist_credentials(
+    credentials: &AnthropicOAuthCredentials,
+) -> anyhow::Result<PathBuf> {
     persist_credentials_to_path(credentials, credentials_file_path())
 }
 
@@ -162,7 +166,12 @@ pub(crate) fn credentials_file_path() -> PathBuf {
 }
 
 fn pkce_verifier() -> String {
-    format!("{}{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+    format!(
+        "{}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -175,7 +184,10 @@ fn wait_for_callback(listener: TcpListener) -> anyhow::Result<(String, String)> 
     let mut buf = [0_u8; 8192];
     let len = stream.read(&mut buf)?;
     let request = String::from_utf8_lossy(&buf[..len]);
-    let line = request.lines().next().context("empty OAuth callback request")?;
+    let line = request
+        .lines()
+        .next()
+        .context("empty OAuth callback request")?;
     let target = line
         .split_whitespace()
         .nth(1)
@@ -195,7 +207,8 @@ fn wait_for_callback(listener: TcpListener) -> anyhow::Result<(String, String)> 
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(), body
+        body.len(),
+        body
     )?;
     Ok((code, state))
 }
@@ -246,7 +259,8 @@ mod tests {
             refresh_token: "refresh".to_string(),
             expires_at: 123,
         };
-        let dir = std::env::temp_dir().join(format!("dirge-anthropic-oauth-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("dirge-anthropic-oauth-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".credentials.json");
 

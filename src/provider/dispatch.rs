@@ -136,7 +136,9 @@ pub enum AnyModel {
     OpenAI(openai::completion::CompletionModel),
     ChatGptOpenAI(openai::responses_api::ResponsesCompletionModel<CodexHttpClient>),
     Anthropic(anthropic::completion::CompletionModel),
-    AnthropicOauth(anthropic::completion::CompletionModel<super::anthropic_http::AnthropicHttpClient>),
+    AnthropicOauth(
+        anthropic::completion::CompletionModel<super::anthropic_http::AnthropicHttpClient>,
+    ),
     Gemini(gemini::completion::CompletionModel),
     DeepSeek(openai::completion::CompletionModel),
     Glm(openai::completion::CompletionModel),
