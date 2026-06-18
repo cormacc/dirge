@@ -1,6 +1,7 @@
 pub(crate) mod auth;
 mod build;
 pub mod client;
+pub(crate) mod anthropic_http;
 pub(crate) mod codex_http;
 mod dispatch;
 mod resolve;
@@ -147,6 +148,7 @@ pub(crate) enum AnyAgentInner {
         Agent<openai::responses_api::ResponsesCompletionModel<codex_http::CodexHttpClient>>,
     ),
     Anthropic(Agent<anthropic::completion::CompletionModel>),
+    AnthropicOauth(Agent<anthropic::completion::CompletionModel<anthropic_http::AnthropicHttpClient>>),
     Gemini(Agent<gemini::completion::CompletionModel>),
     DeepSeek(Agent<openai::completion::CompletionModel>),
     Glm(Agent<openai::completion::CompletionModel>),
@@ -383,6 +385,7 @@ impl AnyAgent {
             AnyAgentInner::OpenAI(_) => "openai",
             AnyAgentInner::ChatGptOpenAI(_) => "openai",
             AnyAgentInner::Anthropic(_) => "anthropic",
+            AnyAgentInner::AnthropicOauth(_) => "anthropic",
             AnyAgentInner::Gemini(_) => "gemini",
             AnyAgentInner::DeepSeek(_) => "deepseek",
             AnyAgentInner::Glm(_) => "glm",
