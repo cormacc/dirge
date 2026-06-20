@@ -3,7 +3,7 @@
 # taken on crates.io. The installed BINARY is still `dirge` (see [[bin]]),
 # so users run: `cargo install dirge-agent` then the `dirge` command.
 name = "dirge-agent"
-version = "0.9.1"
+version = "0.7.8"
 edition = "2024"
 # edition 2024 was stabilized in Rust 1.85; pin the MSRV so older
 # toolchains get a clear error instead of a cryptic edition failure.
@@ -145,6 +145,7 @@ timing-diagnostics = []
 # --no-default-features.
 slash-completion = []
 experimental-ui-terminal-tab = []
+experimental-ui-computer-use = []
 
 [target.'cfg(unix)'.dependencies]
 # Used by the bash tool for process-group cleanup on timeout

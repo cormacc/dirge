@@ -918,6 +918,11 @@ async fn main() -> anyhow::Result<()> {
                     }
                     continue;
                 }
+                // Feature-gated plugins: skip unless the opt-in Cargo feature is on.
+                #[cfg(not(feature = "experimental-ui-computer-use"))]
+                if plugin_name == "computer_use" {
+                    continue;
+                }
                 if cli.verbose {
                     eprintln!("loading plugin: {}", path.display());
                 }
@@ -1153,6 +1158,30 @@ async fn main() -> anyhow::Result<()> {
              File tools (read, write, edit, etc.) operate on the host filesystem."
         );
     }
+    // ── Spawn the Computer-Use sandbox exec drainer ──────────────────
+    // Computer-use plugins call (harness/computer-use-exec ...) which
+    // reaches the worker C function. The C function sends a
+    // SandboxExecRequest through this channel to the tokio runtime.
+    // The drainer builds the safe command, SSHs into the microVM,
+    // and returns the result.
+    let (sandbox_exec_tx, mut sandbox_exec_rx) =
+        tokio::sync::mpsc::unbounded_channel::<plugin::worker::SandboxExecRequest>();
+    plugin::worker::install_sandbox_exec_tx(sandbox_exec_tx);
+    let sandbox_for_exec = sandbox.clone();
+    tokio::spawn(async move {
+        use plugin::worker::{SandboxExecOutput, build_safe_command};
+        while let Some(req) = sandbox_exec_rx.recv().await {
+            let command = build_safe_command(&req.action);
+            let result = match sandbox_for_exec.exec(&command, 30).await {
+                Ok(output) => Ok(SandboxExecOutput {
+                    exit_code: output.exit_code,
+                    merged: output.merged,
+                }),
+                Err(e) => Err(format!("{e}")),
+            };
+            let _ = req.reply.send(result);
+        }
+    });
     let Channels {
         permission,
         ask_tx,
@@ -1439,13 +1468,23 @@ async fn main() -> anyhow::Result<()> {
                 .display()
                 .to_string();
             let mut pm = pm_arc.lock_ignore_poison();
+            let workspace = sandbox.workspace().display().to_string();
+            let sandbox_mode = sandbox.mode_str();
+            let auto_confirm = match cli.auto_confirm {
+                Some(crate::cli::AutoConfirmMode::Yes) => "yes",
+                Some(crate::cli::AutoConfirmMode::No) => "no",
+                None => "ask",
+            };
             if let Err(e) = pm.dispatch(
                 "on-init",
                 &format!(
-                    "@{{:model \"{}\" :cwd \"{}\" :provider \"{}\"}}",
+                    "@{{:model \"{}\" :cwd \"{}\" :provider \"{}\" :workspace \"{}\" :sandbox \"{}\" :auto-confirm \"{}\"}}",
                     escape_janet_string(&model),
                     escape_janet_string(&cwd),
                     escape_janet_string(&provider),
+                    escape_janet_string(&workspace),
+                    escape_janet_string(sandbox_mode),
+                    escape_janet_string(auto_confirm),
                 ),
             ) {
                 eprintln!("warning: plugin on-init dispatch failed: {e}");
