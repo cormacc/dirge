@@ -495,27 +495,18 @@ async fn resolve_auto_verdict(
     tool: &str,
     input: &str,
 ) -> Result<bool, ToolError> {
-    match verdict {
-        AutoVerdict::Allow => Ok(true),
-        AutoVerdict::Deny(reason) => {
-            // Advisory deny → let the human decide. Terminal only when
-            // there's nobody to ask.
-            let Some(tx) = ask_tx else {
-                return Err(ToolError::Msg(format!("{AUTO_DENIAL_PREFIX}: {reason}")));
-            };
-            handle_ask_inner(tx, perm, tool, input).await?;
-            Ok(false)
-        }
-        AutoVerdict::Abstain => {
-            let Some(tx) = ask_tx else {
-                return Err(ToolError::Msg(format!(
-                    "{DENIAL_PREFIX} (non-interactive mode)"
-                )));
-            };
-            handle_ask_inner(tx, perm, tool, input).await?;
-            Ok(false)
-        }
-    }
+    // Deny and Abstain share one path: prompt the human, terminal only when
+    // there's nobody to ask. They differ only in that no-human message.
+    let no_human_msg = match verdict {
+        AutoVerdict::Allow => return Ok(true),
+        AutoVerdict::Deny(reason) => format!("{AUTO_DENIAL_PREFIX}: {reason}"),
+        AutoVerdict::Abstain => format!("{DENIAL_PREFIX} (non-interactive mode)"),
+    };
+    let Some(tx) = ask_tx else {
+        return Err(ToolError::Msg(no_human_msg));
+    };
+    handle_ask_inner(tx, perm, tool, input).await?;
+    Ok(false)
 }
 
 /// Scope arg passed to the [`enforce`] chokepoint. Discriminates

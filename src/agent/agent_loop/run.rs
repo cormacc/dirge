@@ -1903,10 +1903,14 @@ fn build_critic_transcript(new_messages: &[LoopMessage]) -> String {
                     .join(" ");
                 // dirge-kk3x: mark permission/approval denials distinctly so
                 // the critic reads them as a policy wall (out of scope), not a
-                // failure to demand the assistant fix or route around. Classify
-                // on the full text before truncation — the marker is at the
-                // very start, but be explicit.
-                let denied = crate::agent::tools::is_permission_denial(&text);
+                // failure to demand the assistant fix or route around. Gate on
+                // `is_error` exactly like Outcome::classify does — a genuine
+                // enforce-layer denial is always an error result, whereas a
+                // SUCCESSFUL result whose text merely begins "Permission denied"
+                // (e.g. bash returns Ok(text) for a failed `ssh` whose output is
+                // "Permission denied (publickey).") must NOT be excused as
+                // out-of-scope, or the critic would pass genuinely unfinished work.
+                let denied = t.is_error && crate::agent::tools::is_permission_denial(&text);
                 let text: String = text.chars().take(PER_RESULT_CHARS).collect();
                 let tag = if denied {
                     "DENIED"

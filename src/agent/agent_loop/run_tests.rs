@@ -1914,6 +1914,35 @@ fn build_critic_transcript_marks_permission_denials_as_denied() {
     assert!(t.contains("TOOL edit [ERROR]: old_string not found"), "{t}");
 }
 
+/// dirge-kk3x regression: the [DENIED] tag is gated on `is_error`, mirroring
+/// Outcome::classify. A SUCCESSFUL result whose text merely begins
+/// "Permission denied" — e.g. bash returns Ok(text) for a failed `ssh` whose
+/// output is "Permission denied (publickey).\nExit code: 255" — must NOT be
+/// tagged [DENIED], or the critic would excuse genuinely unfinished work.
+#[test]
+fn build_critic_transcript_does_not_mark_successful_permission_denied_text() {
+    use crate::agent::agent_loop::message::ToolResultMessage;
+    let msgs = vec![
+        user("ssh to the box and deploy"),
+        LoopMessage::ToolResult(ToolResultMessage {
+            tool_call_id: "c1".to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Permission denied (publickey).\nExit code: 255".to_string(),
+            }],
+            details: serde_json::json!({}),
+            // bash surfaces a failed command as a non-error result.
+            is_error: false,
+        }),
+    ];
+    let t = super::build_critic_transcript(&msgs);
+    assert!(
+        t.contains("TOOL bash [result]: Permission denied (publickey)."),
+        "a non-error result must keep the [result] tag, not [DENIED]: {t}"
+    );
+    assert!(!t.contains("[DENIED]"), "{t}");
+}
+
 /// Regression (dirge-p9qm): in a long run the head is planning/scaffolding
 /// and the implementation + verification land at the END. The builder used
 /// to keep only the FIRST 8000 chars, so the critic was fed the planning and
