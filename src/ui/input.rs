@@ -130,6 +130,14 @@ fn cursor_line_start(s: &str, cursor: usize) -> usize {
     }
 }
 
+fn cursor_line_end(s: &str, cursor: usize) -> usize {
+    let haystack = &s[cursor..];
+    match haystack.find('\n') {
+        Some(pos) => cursor + pos,
+        None => s.len(),
+    }
+}
+
 fn prev_line_start(s: &str, cursor: usize) -> Option<usize> {
     let line_start = cursor_line_start(s, cursor);
     if line_start == 0 {
@@ -899,16 +907,16 @@ impl InputEditor {
                 }
             }
 
-            // Ctrl+A → start of line
+            // Ctrl+A → start of current line
             KeyCode::Char('a') if ctrl => {
-                self.cursor = 0;
+                self.cursor = cursor_line_start(&self.buffer, self.cursor);
                 self.reset_kill_accumulation();
                 None
             }
 
-            // Ctrl+E → end of line
+            // Ctrl+E → end of current line
             KeyCode::Char('e') if ctrl => {
-                self.cursor = self.buffer.len();
+                self.cursor = cursor_line_end(&self.buffer, self.cursor);
                 self.reset_kill_accumulation();
                 None
             }
@@ -938,12 +946,14 @@ impl InputEditor {
                 None
             }
 
-            // Ctrl+U → kill to start of line
+            // Ctrl+U → kill to start of current line
             KeyCode::Char('u') if ctrl => {
-                if self.cursor > 0 {
-                    let killed: CompactString = self.buffer[..self.cursor].into();
-                    self.buffer = self.buffer[self.cursor..].into();
-                    self.cursor = 0;
+                let line_start = cursor_line_start(&self.buffer, self.cursor);
+                if self.cursor > line_start {
+                    let killed: CompactString = self.buffer[line_start..self.cursor].into();
+                    let after = &self.buffer[self.cursor..];
+                    self.buffer = [&self.buffer[..line_start], after].concat().into();
+                    self.cursor = line_start;
                     self.push_kill(killed, KillDir::Prepend);
                 }
                 None
@@ -1147,13 +1157,13 @@ impl InputEditor {
             }
 
             KeyCode::Home => {
-                self.cursor = 0;
+                self.cursor = cursor_line_start(&self.buffer, self.cursor);
                 self.reset_kill_accumulation();
                 None
             }
 
             KeyCode::End => {
-                self.cursor = self.buffer.len();
+                self.cursor = cursor_line_end(&self.buffer, self.cursor);
                 self.reset_kill_accumulation();
                 None
             }
