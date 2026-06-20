@@ -145,6 +145,7 @@ timing-diagnostics = []
 # --no-default-features.
 slash-completion = []
 experimental-ui-terminal-tab = []
+experimental-ui-computer-use = []
 
 [target.'cfg(unix)'.dependencies]
 # Used by the bash tool for process-group cleanup on timeout

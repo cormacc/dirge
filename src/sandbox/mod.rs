@@ -99,6 +99,17 @@ impl Sandbox {
         }
     }
 
+    /// String label for the current sandbox mode.
+    #[cfg(feature = "plugin")]
+    pub fn mode_str(&self) -> &str {
+        match self.mode {
+            SandboxMode::Off => "off",
+            SandboxMode::Bwrap => "bwrap",
+            #[cfg(feature = "sandbox-microvm")]
+            SandboxMode::Microvm => "microvm",
+        }
+    }
+
     /// True when the sandbox is configured for microVM isolation.
     pub fn is_microvm(&self) -> bool {
         #[cfg(feature = "sandbox-microvm")]
