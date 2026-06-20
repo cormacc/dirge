@@ -45,15 +45,24 @@ pub(crate) fn parse_sessions_command<'a>(parts: &[&'a str]) -> SessionAction<'a>
 /// old fixed 8-char head ("compacte") was identical for every one and
 /// "be more specific" was impossible (dirge).
 pub(crate) fn distinct_id_len(ids: &[&str]) -> usize {
-    const FLOOR: usize = 8;
-    let max = ids.iter().map(|s| s.len()).max().unwrap_or(FLOOR);
-    for n in FLOOR..=max {
+    // Floor: at least 8, but never cut inside an id's leading marker — the
+    // run before its first `-`. A `compacted-<uuid>` session must read as
+    // "compacted…", not the confusing mid-word "compacte" (dirge). Plain
+    // UUID ids have their first `-` at index 8, so they stay at 8.
+    let floor = ids
+        .iter()
+        .map(|s| s.find('-').unwrap_or_else(|| s.len()).min(s.len()))
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    let max = ids.iter().map(|s| s.len()).max().unwrap_or(floor);
+    for n in floor..=max {
         let mut seen = std::collections::HashSet::new();
         if ids.iter().all(|s| seen.insert(crate::text::head(s, n))) {
             return n;
         }
     }
-    max.max(FLOOR)
+    max.max(floor)
 }
 
 #[cfg(test)]
@@ -80,8 +89,19 @@ mod distinct_id_len_tests {
     }
 
     #[test]
-    fn single_id_uses_floor() {
-        assert_eq!(distinct_id_len(&["compacted-whatever"]), 8);
+    fn single_compacted_id_reads_as_compacted_not_compacte() {
+        // The floor never cuts the leading marker, so a lone compacted
+        // session shows "compacted", not the mid-word "compacte" (dirge).
+        let n = distinct_id_len(&["compacted-whatever"]);
+        assert_eq!(n, 9);
+        assert_eq!(crate::text::head("compacted-whatever", n), "compacted");
+    }
+
+    #[test]
+    fn plain_uuid_ids_stay_at_floor_8() {
+        // A first `-` at index 8 (UUID heads) keeps the compact 8-char view.
+        let ids = ["550e8400-aaa", "a1b2c3d4-bbb"];
+        assert_eq!(distinct_id_len(&ids), 8);
     }
 }
 
