@@ -1570,8 +1570,10 @@ mod tests {
         let mut e = InputEditor::new();
         e.insert_str("hello world");
         // Rebind Ctrl+A to move to line END instead of start.
-        e.keymap
-            .insert((KeyCode::Char('a'), KeyModifiers::CONTROL), InputAction::CursorLineEnd);
+        e.keymap.insert(
+            (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            InputAction::CursorLineEnd,
+        );
         e.cursor = 3;
         e.handle_key(ev(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(e.cursor, e.buffer.len(), "Ctrl+A now goes to line end");

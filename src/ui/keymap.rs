@@ -171,7 +171,9 @@ impl Keymap {
     /// i.e. more keys could still complete a binding. Drives the pending-
     /// prefix hold in the chord-sequence runtime (#234).
     fn is_strict_prefix(&self, seq: &[Chord]) -> bool {
-        self.map.keys().any(|k| k.len() > seq.len() && k.starts_with(seq))
+        self.map
+            .keys()
+            .any(|k| k.len() > seq.len() && k.starts_with(seq))
     }
 
     /// Classify an accumulated chord sequence for the #234 runtime.
@@ -390,7 +392,11 @@ impl InputAction {
     /// chords. Single source of truth for the default [`InputKeymap`], the
     /// command-name lookup, and the docs — mirrors [`KeyAction::ALL`].
     #[allow(clippy::type_complexity)]
-    pub const ALL: &'static [(InputAction, &'static str, &'static [(KeyCode, KeyModifiers)])] = &[
+    pub const ALL: &'static [(
+        InputAction,
+        &'static str,
+        &'static [(KeyCode, KeyModifiers)],
+    )] = &[
         (
             InputAction::CursorLineStart,
             "cursor_line_start",
@@ -580,7 +586,11 @@ impl InputKeymap {
 pub fn parse_chord_sequence(spec: &str) -> Option<ChordSeq> {
     let chords: Option<ChordSeq> = spec.split_whitespace().map(parse_chord).collect();
     let chords = chords?;
-    if chords.is_empty() { None } else { Some(chords) }
+    if chords.is_empty() {
+        None
+    } else {
+        Some(chords)
+    }
 }
 
 /// Parse a chord string like `ctrl-r`, `pageup`, `ctrl-shift-x`,
@@ -796,27 +806,81 @@ mod tests {
         let km = InputKeymap::defaults();
         // A representative sweep of the historical text-editing keys.
         let cases = [
-            ((KeyCode::Char('a'), KeyModifiers::CONTROL), InputAction::CursorLineStart),
-            ((KeyCode::Home, KeyModifiers::NONE), InputAction::CursorLineStart),
-            ((KeyCode::Char('e'), KeyModifiers::CONTROL), InputAction::CursorLineEnd),
-            ((KeyCode::End, KeyModifiers::NONE), InputAction::CursorLineEnd),
-            ((KeyCode::Char('b'), KeyModifiers::CONTROL), InputAction::CursorLeft),
+            (
+                (KeyCode::Char('a'), KeyModifiers::CONTROL),
+                InputAction::CursorLineStart,
+            ),
+            (
+                (KeyCode::Home, KeyModifiers::NONE),
+                InputAction::CursorLineStart,
+            ),
+            (
+                (KeyCode::Char('e'), KeyModifiers::CONTROL),
+                InputAction::CursorLineEnd,
+            ),
+            (
+                (KeyCode::End, KeyModifiers::NONE),
+                InputAction::CursorLineEnd,
+            ),
+            (
+                (KeyCode::Char('b'), KeyModifiers::CONTROL),
+                InputAction::CursorLeft,
+            ),
             ((KeyCode::Left, KeyModifiers::NONE), InputAction::CursorLeft),
-            ((KeyCode::Right, KeyModifiers::NONE), InputAction::CursorRight),
-            ((KeyCode::Char('b'), KeyModifiers::ALT), InputAction::WordLeft),
+            (
+                (KeyCode::Right, KeyModifiers::NONE),
+                InputAction::CursorRight,
+            ),
+            (
+                (KeyCode::Char('b'), KeyModifiers::ALT),
+                InputAction::WordLeft,
+            ),
             ((KeyCode::Left, KeyModifiers::ALT), InputAction::WordLeft),
-            ((KeyCode::Char('f'), KeyModifiers::ALT), InputAction::WordRight),
+            (
+                (KeyCode::Char('f'), KeyModifiers::ALT),
+                InputAction::WordRight,
+            ),
             ((KeyCode::Right, KeyModifiers::ALT), InputAction::WordRight),
-            ((KeyCode::Char('k'), KeyModifiers::CONTROL), InputAction::KillToLineEnd),
-            ((KeyCode::Char('u'), KeyModifiers::CONTROL), InputAction::KillToLineStart),
-            ((KeyCode::Char('w'), KeyModifiers::CONTROL), InputAction::KillWordBack),
-            ((KeyCode::Backspace, KeyModifiers::ALT), InputAction::DeleteWordBack),
-            ((KeyCode::Char('d'), KeyModifiers::ALT), InputAction::DeleteWordForward),
-            ((KeyCode::Char('y'), KeyModifiers::CONTROL), InputAction::Yank),
-            ((KeyCode::Char('y'), KeyModifiers::ALT), InputAction::YankPop),
-            ((KeyCode::Char('p'), KeyModifiers::CONTROL), InputAction::HistoryPrev),
-            ((KeyCode::Char('n'), KeyModifiers::CONTROL), InputAction::HistoryNext),
-            ((KeyCode::Char('f'), KeyModifiers::CONTROL), InputAction::ReverseSearch),
+            (
+                (KeyCode::Char('k'), KeyModifiers::CONTROL),
+                InputAction::KillToLineEnd,
+            ),
+            (
+                (KeyCode::Char('u'), KeyModifiers::CONTROL),
+                InputAction::KillToLineStart,
+            ),
+            (
+                (KeyCode::Char('w'), KeyModifiers::CONTROL),
+                InputAction::KillWordBack,
+            ),
+            (
+                (KeyCode::Backspace, KeyModifiers::ALT),
+                InputAction::DeleteWordBack,
+            ),
+            (
+                (KeyCode::Char('d'), KeyModifiers::ALT),
+                InputAction::DeleteWordForward,
+            ),
+            (
+                (KeyCode::Char('y'), KeyModifiers::CONTROL),
+                InputAction::Yank,
+            ),
+            (
+                (KeyCode::Char('y'), KeyModifiers::ALT),
+                InputAction::YankPop,
+            ),
+            (
+                (KeyCode::Char('p'), KeyModifiers::CONTROL),
+                InputAction::HistoryPrev,
+            ),
+            (
+                (KeyCode::Char('n'), KeyModifiers::CONTROL),
+                InputAction::HistoryNext,
+            ),
+            (
+                (KeyCode::Char('f'), KeyModifiers::CONTROL),
+                InputAction::ReverseSearch,
+            ),
             ((KeyCode::Up, KeyModifiers::NONE), InputAction::LineUp),
             ((KeyCode::Down, KeyModifiers::NONE), InputAction::LineDown),
         ];
@@ -842,7 +906,10 @@ mod tests {
         );
         // Ctrl+Shift+A still jumps to line start (Shift dropped → Ctrl+A).
         assert_eq!(
-            km.resolve(&ev(KeyCode::Char('a'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+            km.resolve(&ev(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
             Some(InputAction::CursorLineStart)
         );
         // An explicit Shift binding still wins via the exact pass.
@@ -896,17 +963,20 @@ mod tests {
         let (kms, warns) = Keymaps::from_config(Some(&[cfg("ctrl-z", "kill_to_line_start")]));
         assert!(warns.is_empty(), "{warns:?}");
         assert_eq!(
-            kms.input.resolve(&ev(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+            kms.input
+                .resolve(&ev(KeyCode::Char('z'), KeyModifiers::CONTROL)),
             Some(InputAction::KillToLineStart)
         );
         // The default Ctrl+U still maps too (adding doesn't drop the default).
         assert_eq!(
-            kms.input.resolve(&ev(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            kms.input
+                .resolve(&ev(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             Some(InputAction::KillToLineStart)
         );
         // Global keymap untouched.
         assert_eq!(
-            kms.global.resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            kms.global
+                .resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
             Some(KeyAction::ToggleReasoning)
         );
     }
@@ -914,16 +984,18 @@ mod tests {
     #[test]
     fn config_routes_global_and_input_in_one_array() {
         let (kms, warns) = Keymaps::from_config(Some(&[
-            cfg("ctrl-t", "toggle_reasoning"),  // global
-            cfg("alt-a", "cursor_line_start"),  // input
+            cfg("ctrl-t", "toggle_reasoning"), // global
+            cfg("alt-a", "cursor_line_start"), // input
         ]));
         assert!(warns.is_empty(), "{warns:?}");
         assert_eq!(
-            kms.global.resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            kms.global
+                .resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
             Some(KeyAction::ToggleReasoning)
         );
         assert_eq!(
-            kms.input.resolve(&ev(KeyCode::Char('a'), KeyModifiers::ALT)),
+            kms.input
+                .resolve(&ev(KeyCode::Char('a'), KeyModifiers::ALT)),
             Some(InputAction::CursorLineStart)
         );
     }
@@ -934,11 +1006,13 @@ mod tests {
         // disables it everywhere.
         let (kms, _) = Keymaps::from_config(Some(&[cfg("ctrl-n", "none")]));
         assert_eq!(
-            kms.global.resolve(&ev(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            kms.global
+                .resolve(&ev(KeyCode::Char('n'), KeyModifiers::CONTROL)),
             None
         );
         assert_eq!(
-            kms.input.resolve(&ev(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            kms.input
+                .resolve(&ev(KeyCode::Char('n'), KeyModifiers::CONTROL)),
             None
         );
     }
@@ -994,12 +1068,14 @@ mod tests {
         assert!(warns.is_empty(), "{warns:?}");
         // Plugin-only binding present.
         assert_eq!(
-            kms.global.resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            kms.global
+                .resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
             Some(KeyAction::ToggleReasoning)
         );
         // User wins the Ctrl+R conflict over the plugin.
         assert_eq!(
-            kms.global.resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            kms.global
+                .resolve(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL)),
             Some(KeyAction::ScrollToTop)
         );
     }
@@ -1008,20 +1084,19 @@ mod tests {
     fn plugin_can_rebind_an_input_command_and_unbind() {
         // A plugin remapping the editor: bind Ctrl+T to kill-to-line-end and
         // disable the default Ctrl+K.
-        let plugin = [
-            cfg("ctrl-t", "kill_to_line_end"),
-            cfg("ctrl-k", "none"),
-        ];
+        let plugin = [cfg("ctrl-t", "kill_to_line_end"), cfg("ctrl-k", "none")];
         let (kms, warns) = Keymaps::from_config(Some(&plugin));
         assert!(warns.is_empty(), "{warns:?}");
         assert_eq!(
-            kms.input.resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            kms.input
+                .resolve(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL)),
             Some(InputAction::KillToLineEnd)
         );
         // Ctrl+K cleared from the input map (and the global kill_subagent
         // default too, since `none` clears both contexts).
         assert_eq!(
-            kms.input.resolve(&ev(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            kms.input
+                .resolve(&ev(KeyCode::Char('k'), KeyModifiers::CONTROL)),
             None
         );
     }
@@ -1038,9 +1113,16 @@ mod tests {
         // default terminal binding (close_chat) is dropped with a warning —
         // the sequence wins.
         let (kms, warns) = Keymaps::from_config(Some(&[cfg("ctrl-x ctrl-s", "toggle_reasoning")]));
-        assert_eq!(kms.global.map.get(&vec![ctrl('x'), ctrl('s')]), Some(&KeyAction::ToggleReasoning));
+        assert_eq!(
+            kms.global.map.get(&vec![ctrl('x'), ctrl('s')]),
+            Some(&KeyAction::ToggleReasoning)
+        );
         // Plain Ctrl+X no longer resolves to close_chat (it's a prefix now).
-        assert_eq!(kms.global.resolve(&ev(KeyCode::Char('x'), KeyModifiers::CONTROL)), None);
+        assert_eq!(
+            kms.global
+                .resolve(&ev(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            None
+        );
         assert!(
             warns.iter().any(|w| w.contains("starts a chord sequence")),
             "{warns:?}"
@@ -1077,9 +1159,14 @@ mod tests {
         // Sequences only fire for global commands; an input-command sequence
         // is dropped with a warning rather than left as a dead binding.
         let (kms, warns) = Keymaps::from_config(Some(&[cfg("ctrl-x ctrl-s", "kill_to_line_end")]));
-        assert!(kms.input.map.keys().all(|k| k.len() == 1), "no input sequences kept");
         assert!(
-            warns.iter().any(|w| w.contains("only supported for global commands")),
+            kms.input.map.keys().all(|k| k.len() == 1),
+            "no input sequences kept"
+        );
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("only supported for global commands")),
             "{warns:?}"
         );
     }

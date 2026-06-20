@@ -1597,7 +1597,11 @@ mod tests {
         let list = worker.eval("harness-keybindings-list").unwrap();
         assert!(list.contains("ctrl-t\ttoggle_reasoning"), "{list}");
         assert!(list.contains("ctrl-x ctrl-s\tscroll_to_top"), "{list}");
-        assert_eq!(list.lines().count(), 2, "non-string call added nothing: {list}");
+        assert_eq!(
+            list.lines().count(),
+            2,
+            "non-string call added nothing: {list}"
+        );
     }
 
     /// dirge-l6bf: a plugin must NOT be able to terminate the host process.
