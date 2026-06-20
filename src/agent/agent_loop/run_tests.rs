@@ -1881,6 +1881,39 @@ fn build_critic_transcript_pins_the_exact_critic_facing_format() {
     );
 }
 
+/// dirge-kk3x: a permission/approval denial is tagged `[DENIED]`, not the
+/// generic `[ERROR]`, so the critic reads it as a policy wall (out of scope)
+/// rather than a failure to demand the assistant fix.
+#[test]
+fn build_critic_transcript_marks_permission_denials_as_denied() {
+    use crate::agent::agent_loop::message::ToolResultMessage;
+    let msgs = vec![
+        user("commit and push"),
+        LoopMessage::ToolResult(ToolResultMessage {
+            tool_call_id: "c1".to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Permission denied: git is outside the project directory".to_string(),
+            }],
+            details: serde_json::json!({}),
+            is_error: true,
+        }),
+        // A non-denial error keeps the generic ERROR tag.
+        LoopMessage::ToolResult(ToolResultMessage {
+            tool_call_id: "c2".to_string(),
+            tool_name: "edit".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "old_string not found".to_string(),
+            }],
+            details: serde_json::json!({}),
+            is_error: true,
+        }),
+    ];
+    let t = super::build_critic_transcript(&msgs);
+    assert!(t.contains("TOOL bash [DENIED]: Permission denied"), "{t}");
+    assert!(t.contains("TOOL edit [ERROR]: old_string not found"), "{t}");
+}
+
 /// Regression (dirge-p9qm): in a long run the head is planning/scaffolding
 /// and the implementation + verification land at the END. The builder used
 /// to keep only the FIRST 8000 chars, so the critic was fed the planning and

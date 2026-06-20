@@ -55,6 +55,10 @@ forbid or defer (e.g. if it was told not to push/commit/deploy, do NOT ask it to
 the instructions place out of scope as correctly omitted.\n\
 - Block only on CONCRETE, in-scope incompleteness with evidence (e.g. the user asked for X and X \
 is missing; a change was made but never built/tested when verification was expected).\n\
+- A tool result tagged `[DENIED]` (or whose text begins `Permission denied` / `Auto-approval \
+denied`) is a PERMISSION block, not a failure to fix. Treat that capability as out of scope: \
+never demand the assistant retry it, route around it, or accomplish the blocked action some \
+other way. Judge the rest of the work as if that action were correctly deferred to the user.\n\
 - A block marked `[CONTEXT COMPACTION — REFERENCE ONLY]` (or a `## Active Task` lifted from one) \
 describes ALREADY-COMPLETED prior work — never treat it as an outstanding requirement. Judge only \
 the latest request and the transcript.\n\
