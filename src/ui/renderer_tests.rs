@@ -1126,3 +1126,96 @@ fn eviction_generation_bumps_when_scrollback_overflows() {
         "front eviction must bump the generation"
     );
 }
+
+// ── dirge-qy3y: scrollback reflow on resize ─────────────────────────
+
+/// Plain text re-wraps to a new width when the buffer is rebuilt from its
+/// source blocks, and rebuilding back at the original width reproduces the
+/// original wrap exactly.
+#[test]
+fn rebuild_reflows_plain_text_to_new_width() {
+    let mut r = Renderer::new().expect("renderer");
+    r.set_test_cols(40);
+    let long = "the quick brown fox jumps over the lazy dog and then keeps on running very far";
+    r.write_line(long, Color::White).unwrap();
+    let wide_rows = r.buffer_len();
+
+    r.set_test_cols(20);
+    r.rebuild();
+    let narrow_rows = r.buffer_len();
+    assert!(
+        narrow_rows > wide_rows,
+        "narrower width must wrap into more rows: {wide_rows} -> {narrow_rows}",
+    );
+
+    r.set_test_cols(40);
+    r.rebuild();
+    assert_eq!(
+        r.buffer_len(),
+        wide_rows,
+        "rebuild at the original width reproduces the original wrap",
+    );
+}
+
+/// A committed markdown table reflows its column layout to a narrower width
+/// on rebuild (the bug report: tables kept their first-render widths).
+#[test]
+fn rebuild_reflows_markdown_table() {
+    use unicode_width::UnicodeWidthStr;
+    let mut r = Renderer::new().expect("renderer");
+    r.set_test_cols(70);
+    let table = "| name | description |\n|---|---|\n| alpha | the first item here |\n| beta | a second item over there |";
+    r.stream(table, Color::White, false);
+    r.commit_stream();
+    let wide_max = r
+        .buffer_lines()
+        .iter()
+        .map(|l| UnicodeWidthStr::width(*l))
+        .max()
+        .unwrap_or(0);
+
+    r.set_test_cols(34);
+    r.rebuild();
+    let narrow_max = r
+        .buffer_lines()
+        .iter()
+        .map(|l| UnicodeWidthStr::width(*l))
+        .max()
+        .unwrap_or(0);
+
+    assert!(
+        narrow_max < wide_max,
+        "table must reflow to a smaller max row width: {wide_max} -> {narrow_max}",
+    );
+    // content_width at 34 cols = min(34-2, 120) = 32.
+    assert!(
+        narrow_max <= 32,
+        "reflowed table rows must fit the new content width (<=32), got {narrow_max}",
+    );
+}
+
+/// The strong invariant the whole design rests on: at a fixed width, the
+/// derived `buffer` equals a rebuild from `source` — so `source` is a
+/// faithful mirror of `buffer` across plain, markdown, and interleaved
+/// content.
+#[test]
+fn rebuild_is_idempotent_at_same_width() {
+    let mut r = Renderer::new().expect("renderer");
+    r.set_test_cols(50);
+    r.write_line("hello world", Color::White).unwrap();
+    r.stream(
+        "# Heading\n\nsome **bold** prose that runs on",
+        Color::White,
+        true,
+    );
+    r.commit_stream();
+    r.write_line("trailing status line", Color::White).unwrap();
+
+    let before: Vec<String> = r.buffer_lines().iter().map(|s| s.to_string()).collect();
+    r.rebuild();
+    let after: Vec<String> = r.buffer_lines().iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        before, after,
+        "rebuild at the same width must reproduce the buffer exactly",
+    );
+}

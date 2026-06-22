@@ -293,19 +293,16 @@ pub(crate) async fn handle_done(
     }
 
     if !ctx.response_buf.is_empty() {
-        let max_width = ctx.renderer.content_width().saturating_sub(9); // 8-col handle + space
-        let mut styled =
-            crate::ui::markdown::markdown_to_styled(ctx.response_buf, max_width, c_agent());
-        if !styled.is_empty() {
-            styled[0].text = CompactString::from(format!("<dirge> {}", styled[0].text));
-        }
-        if let Some(start) = *ctx.response_start_line {
-            ctx.renderer.replace_from(start, styled);
-            ctx.renderer.render_viewport()?;
-        }
+        // dirge-qy3y: final render through the source-tracked stream API (the
+        // open block created during streaming), so the committed response is a
+        // reflowable markdown block. `commit_stream` seals it.
+        ctx.renderer.stream(ctx.response_buf, c_agent(), true);
+        ctx.renderer.render_viewport()?;
     } else if !*ctx.agent_line_started {
         ctx.renderer.write("<dirge> ", c_agent())?;
     }
+    // Seal any open streamed block (response above, or reasoning-only turn).
+    ctx.renderer.commit_stream();
 
     ctx.renderer.write_line("", Color::White)?;
     ctx.renderer.write_line("", Color::White)?;

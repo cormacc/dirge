@@ -1366,6 +1366,16 @@ pub async fn run_interactive(
                         // wrap, panel clipping, and input box rows recompute
                         // at the new size instead of waiting for the next
                         // unrelated event to trigger a redraw.
+                        //
+                        // dirge-qy3y: regenerate scrollback from its
+                        // width-independent source blocks so markdown — tables
+                        // especially — reflows to the new width instead of
+                        // keeping the column widths it was first rendered at.
+                        // The streamed block (if a turn is mid-flight) is part
+                        // of `source` and reflows too; the renderer owns the
+                        // open-stream state, so the next token re-renders it at
+                        // the new width with no stale anchor.
+                        renderer.rebuild();
                         renderer.request_repaint();
                         continue;
                     }
