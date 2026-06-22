@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-22
+
+### Fixed
+- **OpenAI Responses streaming.** Historical reasoning blocks (which the
+  Responses API rejects without provider-generated IDs) are dropped and tool
+  `call_id`s are synthesized for OpenAI requests, fixing broken streaming /
+  tool-use against OpenAI. Applies to all three OpenAI client variants — API
+  key, ChatGPT-OAuth, and Codex — regardless of the configured provider alias.
+  (#510 + follow-up, issue #480; thanks @ericschmar)
+- **Preserve partial answers when escaping a multi-question prompt.** Pressing
+  Esc after answering at least one question in a batch now returns the answers
+  given (remaining questions marked `[no answer]`) instead of discarding
+  everything. Esc on the first question still cancels. (#508; thanks @rgkirch)
+
 ## [0.11.1] - 2026-06-22
 
 ### Added
