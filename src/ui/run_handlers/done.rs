@@ -567,7 +567,9 @@ pub(crate) async fn handle_done(
 
         // Persist entity/relation records drained from Janet harness
         // accumulators (#393). Best-effort: silently skip on DB errors.
-        #[cfg(feature = "experimental-graph-search")]
+        // Requires both experimental-graph-search (SQL tables) and
+        // plugin (Janet harness accumulators exist).
+        #[cfg(all(feature = "experimental-graph-search", feature = "plugin"))]
         {
             if let Some(pm) = plugin_manager {
                 let mut mgr = pm.lock_ignore_poison();

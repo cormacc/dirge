@@ -223,7 +223,7 @@ mod tests {
             CREATE TABLE entities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL REFERENCES sessions(id),
-                message_id INTEGER NOT NULL REFERENCES messages(id),
+                message_id INTEGER REFERENCES messages(id),
                 kind TEXT NOT NULL,
                 name TEXT NOT NULL,
                 extra TEXT,

@@ -22,7 +22,15 @@ use regex::Regex;
 // Used in migrate() to set user_version pragma. pub(crate) so tests
 // assert against the constant instead of a hardcoded number that
 // breaks on every migration.
+//
+// SCHEMA_VERSION is feature-gated: v14 adds entities/relations tables
+// behind `experimental-graph-search`. Without the feature, the schema
+// caps at v13 so the user_version pragma never outruns the tables that
+// actually exist.
+#[cfg(feature = "experimental-graph-search")]
 pub(crate) const SCHEMA_VERSION: u32 = 14;
+#[cfg(not(feature = "experimental-graph-search"))]
+pub(crate) const SCHEMA_VERSION: u32 = 13;
 
 /// Thread-safe snapshot of the most recent `SessionDb::open()` failure.
 /// Port of Hermes's `_last_init_error` (hermes_state.py:66-67).
