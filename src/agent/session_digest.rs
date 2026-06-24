@@ -13,8 +13,9 @@
 //! UNDER the LLM review, not a replacement.
 //!
 //! Two consumers:
-//! - the background review prepends [`review_preamble`] to the transcript so
-//!   the model ranks/classifies KNOWN facts instead of hunting for them;
+//! - the background review prepends the digest (via [`assemble_review_transcript`])
+//!   to the transcript so the model ranks/classifies KNOWN facts instead of
+//!   hunting for them;
 //! - the throttled/errored-review fallback (dirge-a62g 1b) persists the digest
 //!   so a session's ground-truth is never fully lost (sibling: dirge-hcv8's
 //!   open-threads carry-over builds on the same extraction).
@@ -175,12 +176,12 @@ impl SessionDigest {
 /// The transcript handed to the background review: the deterministic digest
 /// preamble (when any) followed by the conversation `base`. Single owner of the
 /// preamble-vs-conversation layout so both post-session entry points agree.
-/// Finish a review transcript from an already-built [`SessionDigest`]: attach
-/// git (this shells out `git diff --stat`) and prepend the rendered preamble to
-/// `base`. Split from [`review_transcript`] so the caller can build the
-/// session-derived digest on the UI thread (cheap) but defer the git subprocess
-/// to the post-session task (dirge-6rtt) — keeping the event loop off a
-/// subprocess on every turn end.
+///
+/// Takes an already-built [`SessionDigest`] and attaches git (this shells out
+/// `git diff --stat`) before rendering. The caller builds the session-derived
+/// digest on the UI thread (cheap, shell-free) and defers this — the git
+/// subprocess — to the post-session task (dirge-6rtt), so the event loop never
+/// shells out on a turn end.
 pub fn assemble_review_transcript(digest: SessionDigest, repo_root: &Path, base: String) -> String {
     let preamble = digest
         .with_git_diff_stat(git_diff_stat(repo_root))
