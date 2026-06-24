@@ -5,6 +5,7 @@ pub(crate) mod box_render;
 pub(crate) mod buffer;
 mod chat_state;
 pub(crate) mod colors;
+pub(crate) mod compaction;
 pub(crate) mod events;
 pub(crate) mod gitstatus;
 mod highlight;
@@ -1486,6 +1487,14 @@ pub async fn run_interactive(
                                 if let Some(ph) = ui.plan_phase.take() {
                                     ph.task.abort();
                                 }
+                                // dirge-tv3p: abort an in-flight non-blocking
+                                // compaction (the summarizer task) too. Dropping
+                                // the handle drops its receiver; aborting the
+                                // task cancels the LLM call. Any continuation
+                                // prompt is discarded with the handle.
+                                if let Some(ph) = ui.compaction_phase.take() {
+                                    ph.task.abort();
+                                }
                                 // Cooperative cancel first: lets the
                                 // retry loop and rig stream observe
                                 // `signal.is_cancelled()` and exit
@@ -1582,6 +1591,10 @@ pub async fn run_interactive(
                             ui.is_running = false;
                             // Abort an in-flight phased `/plan` task too (dirge-vuzz).
                             if let Some(ph) = ui.plan_phase.take() {
+                                ph.task.abort();
+                            }
+                            // dirge-tv3p: and an in-flight non-blocking compaction.
+                            if let Some(ph) = ui.compaction_phase.take() {
                                 ph.task.abort();
                             }
                             if let Some(tx) = ui.agent_cancel.take() {
@@ -2223,23 +2236,34 @@ pub async fn run_interactive(
                                         let s = s.trim();
                                         if s.is_empty() || s == "(none)" { None } else { Some(s.to_string()) }
                                     });
-                                        let compress_result = handle_compress(
+                                        // dirge-tv3p: don't run the summarizer
+                                        // inline (it froze the loop for 10-60s).
+                                        // Decide on-thread, then spawn the LLM as
+                                        // a task the `compaction_phase` select! arm
+                                        // installs; the loop stays responsive and
+                                        // Ctrl+C aborts. forced=true (explicit).
+                                        match crate::ui::slash::prepare_compaction(
                                             instructions.as_deref(),
-                                            true, // forced: explicit /compact [dirge-fgtj]
-                                            &mut agent, &client, &mut renderer, session, cli, cfg, context,
-                                            &permission, &ask_tx, &question_tx, &plan_tx, &user_tx, &bg_store, &sandbox,
-                                            #[cfg(feature = "mcp")] mcp_manager.as_ref(),
-                                            #[cfg(feature = "semantic")] semantic_manager,
-                                            #[cfg(feature = "lsp")] lsp_manager.as_ref(),
-                                        ).await;
-                                        if let Err(e) = compress_result {
-                                            renderer.write_line(&format!("compress error: {}", e), c_error())?;
-                                        }
-                                        if let Err(e) = crate::session::storage::save_session(session) {
-                                            renderer.write_line(
-                                                &format!("warning: failed to save session: {}", e),
-                                                c_error(),
-                                            )?;
+                                            true,
+                                            &agent, &client, &mut renderer, session, cfg,
+                                        ) {
+                                            Ok(crate::ui::slash::CompactionDecision::Ready(req)) => {
+                                                ui.compaction_phase = Some(crate::ui::compaction::spawn(
+                                                    req,
+                                                    crate::ui::compaction::CompactionThen::Nothing,
+                                                ));
+                                                ui.is_running = true;
+                                                renderer.set_avatar_state(avatar::AvatarState::Thinking);
+                                            }
+                                            Ok(crate::ui::slash::CompactionDecision::NoOp(_)) => {
+                                                // prepare already rendered why.
+                                                if let Err(e) = crate::session::storage::save_session(session) {
+                                                    renderer.write_line(&format!("warning: failed to save session: {e}"), c_error())?;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                renderer.write_line(&format!("compress error: {e}"), c_error())?;
+                                            }
                                         }
                                     }
                                     #[cfg(feature = "git-worktree")]
@@ -3049,6 +3073,110 @@ pub async fn run_interactive(
                         renderer.request_repaint();
                     }
                 }
+            }
+            // dirge-tv3p: non-blocking compaction. The summarizer LLM runs on a
+            // spawned task; this arm installs its result on the UI thread and
+            // runs the continuation (preemptive/reactive resend), so the loop
+            // stays responsive (and Ctrl+C abortable) for the 10-60s the
+            // summarizer takes. Binds the Option directly so a closed channel
+            // doesn't busy-loop the select.
+            ev = async {
+                if let Some(ph) = &mut ui.compaction_phase {
+                    ph.rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                use crate::ui::compaction::{CompactionPhaseEvent, CompactionThen};
+                // The recv borrow is released here, so take the handle (and its
+                // install inputs + continuation) out.
+                let Some(handle) = ui.compaction_phase.take() else {
+                    continue;
+                };
+                let cut_idx = handle.cut_idx;
+                let tokens_before = handle.tokens_before;
+                let then = handle.then;
+
+                // Decide whether to run the continuation prompt: on success
+                // always; on failure only for the preemptive case (a reactive
+                // resend would just re-overflow).
+                let run_prompt: Option<String> = match ev {
+                    Some(CompactionPhaseEvent::Done { summary }) => {
+                        let outcome = crate::ui::slash::install_compaction(
+                            summary, cut_idx, tokens_before,
+                            &mut agent, &client, &mut renderer, session, cli, cfg, context,
+                            &permission, &ask_tx, &question_tx, &plan_tx, &bg_store, &sandbox,
+                            #[cfg(feature = "mcp")] mcp_manager.as_ref(),
+                            #[cfg(feature = "semantic")] semantic_manager,
+                            #[cfg(feature = "lsp")] lsp_manager.as_ref(),
+                        ).await;
+                        if let Err(e) = outcome {
+                            renderer.write_line(&format!("compress error: {e}"), c_error())?;
+                        }
+                        if let Err(e) = crate::session::storage::save_session(session) {
+                            renderer.write_line(&format!("warning: failed to save session: {e}"), c_error())?;
+                        }
+                        match then {
+                            CompactionThen::Nothing => None,
+                            CompactionThen::SendPrompt { prompt, .. } => Some(prompt),
+                        }
+                    }
+                    other => {
+                        // Failed, or the task channel closed without an event.
+                        let error = match other {
+                            Some(CompactionPhaseEvent::Failed { error }) => error,
+                            _ => "compaction task ended unexpectedly".to_string(),
+                        };
+                        match then {
+                            CompactionThen::Nothing => {
+                                renderer.write_line(&format!("compaction failed: {error}"), c_error())?;
+                                None
+                            }
+                            CompactionThen::SendPrompt { prompt, reactive } => {
+                                if reactive {
+                                    // The prompt overflowed and compaction
+                                    // couldn't shrink the context — don't resend
+                                    // (it would just overflow again).
+                                    renderer.write_line(
+                                        &format!("compaction failed and context is still over the limit: {error}"),
+                                        c_error(),
+                                    )?;
+                                    None
+                                } else {
+                                    // Preemptive estimate; the real send may
+                                    // still fit and reactive recovery is the
+                                    // backstop. Proceed best-effort.
+                                    renderer.write_line(
+                                        &format!("preemptive compaction failed (will retry reactively if needed): {error}"),
+                                        c_error(),
+                                    )?;
+                                    Some(prompt)
+                                }
+                            }
+                        }
+                    }
+                };
+
+                if let Some(prompt) = run_prompt {
+                    // Normal streamed turn from the post-compaction state. Mirrors
+                    // the preemptive submit path: history (without the new prompt),
+                    // spawn the runner, then record the user message.
+                    let history = crate::agent::runner::convert_history(session);
+                    let runner = agent.clone().spawn_runner(
+                        crate::agent::tools::background::prepend_pending_notifications(&prompt, bg_store.as_ref()),
+                        history,
+                        Some(ui.interjection_queue.clone()),
+                    );
+                    runner.install_into(&mut ui.agent_rx, &mut ui.agent_abort, &mut ui.agent_interject, &mut ui.agent_cancel, &mut ui.is_running);
+                    session.add_message(MessageRole::User, &prompt);
+                    begin_snapshot_turn(session);
+                    ui.last_user_prompt.clone_from(&prompt);
+                    renderer.set_avatar_state(avatar::AvatarState::Idle);
+                } else {
+                    ui.is_running = false;
+                    renderer.set_avatar_state(avatar::AvatarState::Idle);
+                }
+                renderer.request_repaint();
             }
             Some(ask_req) = async {
                 if let Some(rx) = &mut ask_rx {
