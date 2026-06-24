@@ -202,6 +202,7 @@ pub async fn handle_compress(
     match prepare_compaction(instructions, forced, agent, client, renderer, session, cfg)? {
         CompactionDecision::NoOp(outcome) => Ok(outcome),
         CompactionDecision::Ready(req) => {
+            let req = *req;
             let summary = crate::provider::run_compaction(req.model, req.prompt).await?;
             install_compaction(
                 summary,
@@ -249,8 +250,9 @@ pub(crate) struct CompactionRequest {
 pub(crate) enum CompactionDecision {
     /// Nothing to do — the reason was already rendered.
     NoOp(CompressOutcome),
-    /// Run the summarizer (off-thread) then [`install_compaction`].
-    Ready(CompactionRequest),
+    /// Run the summarizer (off-thread) then [`install_compaction`]. Boxed —
+    /// `CompactionRequest` (model + prompt) is much larger than `NoOp`.
+    Ready(Box<CompactionRequest>),
 }
 
 /// dirge-tv3p: the SYNCHRONOUS, on-UI-thread half of compaction — decide
@@ -344,12 +346,12 @@ pub(crate) fn prepare_compaction(
         .sum();
     let model = client.completion_model(session.model.to_string());
 
-    Ok(CompactionDecision::Ready(CompactionRequest {
+    Ok(CompactionDecision::Ready(Box::new(CompactionRequest {
         model,
         prompt,
         cut_idx,
         tokens_before,
-    }))
+    })))
 }
 
 /// dirge-tv3p: the on-UI-thread INSTALL half — given the summary from the

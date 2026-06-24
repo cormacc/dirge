@@ -2249,7 +2249,7 @@ pub async fn run_interactive(
                                         ) {
                                             Ok(crate::ui::slash::CompactionDecision::Ready(req)) => {
                                                 ui.compaction_phase = Some(crate::ui::compaction::spawn(
-                                                    req,
+                                                    *req,
                                                     crate::ui::compaction::CompactionThen::Nothing,
                                                 ));
                                                 ui.is_running = true;
@@ -2578,7 +2578,7 @@ pub async fn run_interactive(
                                     ) {
                                         Ok(crate::ui::slash::CompactionDecision::Ready(req)) => {
                                             ui.compaction_phase = Some(crate::ui::compaction::spawn(
-                                                req,
+                                                    *req,
                                                 crate::ui::compaction::CompactionThen::SendPrompt {
                                                     run_prompt: prompt.clone(),
                                                     record_text: text.to_string(),
