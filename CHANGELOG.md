@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.12.0] - 2026-06-24
 
+### Added
+- **Experimental entity/relation graph storage** behind the
+  `experimental-graph-search` feature gate: entity/relation recording, FTS5 +
+  recursive-CTE graph search, a `/graph` command, and Janet harness hooks
+  (schema v14). Opt-in; no effect on the default build. (#513, closes #393;
+  thanks @allen-munsch)
+
+### Fixed
+- **Computer-use hardening** (experimental `experimental-ui-computer-use`):
+  closed a single-character shell-injection path in key validation, replaced
+  guessable `os/time` temp files with `mktemp`, deduplicated the bash CONTRACT
+  hint, and routed desktop actions through the permission PDP (`deny_tools`).
+  (#514, follow-up to #415; thanks @allen-munsch)
+
 ### Changed
 - **The UI no longer freezes during background work.** Long operations used to
   be `.await`ed inline in the single-threaded event loop, freezing rendering,
