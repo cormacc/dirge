@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-06-25
+
+### Added
+- **SQL semantic support** behind the `semantic-sql` feature (in `default` /
+  `windows-default`), backed by the `tree-sitter-sequel` grammar: `list_symbols`
+  / `get_symbol_body` / `find_definition` over DDL objects (tables, views,
+  materialized views, functions, indexes, types). (#516; thanks @nikolap)
+
+### Fixed
+- **SQL writes are no longer blocked by the generic SQL grammar.** `.sql` was
+  wired into the pre-write syntax gate, which hard-rejects parse errors — but
+  `tree-sitter-sequel` flags valid mainstream SQL (`CREATE PROCEDURE`, the whole
+  T-SQL dialect) as errors, so the agent couldn't save it. `.sql` is dropped
+  from the write gate; semantic indexing (which tolerates parse errors) is
+  unaffected.
+- **SQL adapter: anonymous `CREATE INDEX ON t(col)`** no longer emits the table
+  as a bogus index symbol — an unnamed index has no symbol to record.
+- **SQL adapter: DDL nested in a function body** (e.g. a `CREATE TABLE` inside a
+  PL/pgSQL `$$ … $$` body) no longer leaks in as a spurious top-level symbol.
+
 ## [0.12.2] - 2026-06-24
 
 ### Fixed

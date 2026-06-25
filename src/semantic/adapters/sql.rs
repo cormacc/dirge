@@ -22,12 +22,12 @@ pub struct SqlAdapter;
 
 impl SqlAdapter {
     /// The object name is the first `identifier` leaf in document
-    /// order: DDL always names the object before any column /
-    /// parameter / body list, so the first identifier encountered is
-    /// the object name (`CREATE TABLE users (...)` → `users`,
-    /// `CREATE INDEX idx ON users(col)` → `idx`). Keywords are
-    /// `keyword_*` nodes, never `identifier`, so `IF NOT EXISTS` and
-    /// `TEMPORARY` don't interfere.
+    /// order: for `CREATE TABLE/VIEW/FUNCTION/TYPE` the name lives in an
+    /// `object_reference` that precedes any column / parameter / body
+    /// list, so the first identifier encountered is the object name
+    /// (`CREATE TABLE users (...)` → `users`). Keywords are `keyword_*`
+    /// nodes, never `identifier`, so `IF NOT EXISTS` / `TEMPORARY` don't
+    /// interfere. (Not used for `CREATE INDEX` — see `direct_identifier`.)
     fn first_identifier(&self, n: Node, s: &[u8]) -> Option<String> {
         if n.kind() == "identifier" {
             return Some(node_text(n, s).to_string());
@@ -41,10 +41,21 @@ impl SqlAdapter {
         None
     }
 
-    fn emit(&self, n: Node, s: &[u8], symbols: &mut Vec<Symbol>, kind: SymbolKind) {
-        let Some(name) = self.first_identifier(n, s) else {
-            return;
-        };
+    /// The first `identifier` that is a DIRECT child of `n`. For
+    /// `CREATE INDEX` the optional index name is a direct `identifier`
+    /// child (the indexed table sits one level down inside an
+    /// `object_reference`), so this returns the index name when named
+    /// and `None` for an anonymous `CREATE INDEX ON t(col)` — which has
+    /// no name to index. `first_identifier` would instead walk into the
+    /// `object_reference` and wrongly return the table name.
+    fn direct_identifier(&self, n: Node, s: &[u8]) -> Option<String> {
+        let mut cursor = n.walk();
+        n.named_children(&mut cursor)
+            .find(|c| c.kind() == "identifier")
+            .map(|c| node_text(c, s).to_string())
+    }
+
+    fn emit(&self, n: Node, s: &[u8], symbols: &mut Vec<Symbol>, kind: SymbolKind, name: String) {
         symbols.push(Symbol {
             kind,
             is_exported: true,
@@ -55,25 +66,31 @@ impl SqlAdapter {
         });
     }
 
-    /// Recursively scan for DDL nodes. The grammar wraps each
-    /// top-level statement in `statement` (and `create_statement`),
-    /// which we recurse through transparently. `create_*` nodes never
-    /// nest, so each fires exactly once.
+    /// Recursively scan for top-level DDL nodes. The grammar wraps each
+    /// statement in `statement`, which we recurse through transparently.
+    /// `create_*` nodes CAN nest (e.g. DDL inside a PL/pgSQL function
+    /// body), so once one is emitted we STOP descending — otherwise a
+    /// helper object created inside a function body would leak in as a
+    /// spurious top-level symbol.
     fn walk(&self, n: Node, s: &[u8], symbols: &mut Vec<Symbol>) {
-        match n.kind() {
+        let resolved = match n.kind() {
             "create_table" | "create_view" | "create_materialized_view" => {
-                self.emit(n, s, symbols, SymbolKind::Class);
+                Some((SymbolKind::Class, self.first_identifier(n, s)))
             }
-            "create_function" => {
-                self.emit(n, s, symbols, SymbolKind::Function);
+            "create_function" => Some((SymbolKind::Function, self.first_identifier(n, s))),
+            "create_type" => Some((SymbolKind::TypeAlias, self.first_identifier(n, s))),
+            // Index name is the direct child, and is optional.
+            "create_index" => Some((SymbolKind::Variable, self.direct_identifier(n, s))),
+            _ => None,
+        };
+        if let Some((kind, name)) = resolved {
+            // A named DDL object → emit; an anonymous one (e.g.
+            // `CREATE INDEX ON t(col)`) has no name, so skip. Either way
+            // do not descend into a create_* node.
+            if let Some(name) = name {
+                self.emit(n, s, symbols, kind, name);
             }
-            "create_index" => {
-                self.emit(n, s, symbols, SymbolKind::Variable);
-            }
-            "create_type" => {
-                self.emit(n, s, symbols, SymbolKind::TypeAlias);
-            }
-            _ => {}
+            return;
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -224,5 +241,42 @@ mod tests {
         let f = SqlAdapter.extract(&pb("schema.sql"), src).unwrap();
         assert!(f.symbols.iter().any(|s| s.name == "public"));
         assert!(!f.symbols.iter().any(|s| s.name == "users"));
+    }
+
+    #[test]
+    fn anonymous_index_is_not_misattributed_to_table() {
+        // Postgres allows omitting the index name. The indexed table sits
+        // inside an `object_reference` one level down, so the old
+        // first-identifier-leaf logic emitted a bogus `users` Variable.
+        // An anonymous index has no name to index → emit nothing.
+        let src = "CREATE INDEX ON users(email);\n";
+        let f = SqlAdapter.extract(&pb("idx.sql"), src).unwrap();
+        assert!(
+            !f.symbols
+                .iter()
+                .any(|s| s.name == "users" && matches!(s.kind, SymbolKind::Variable)),
+            "anonymous index must not be attributed to the table: {:?}",
+            f.symbols
+        );
+        assert!(f.symbols.is_empty(), "got {:?}", f.symbols);
+    }
+
+    #[test]
+    fn nested_ddl_in_function_body_does_not_leak() {
+        // `create_*` nodes nest: a function body can contain DDL. Only the
+        // function itself is a top-level object; the helper table inside
+        // the body must NOT surface as its own symbol.
+        let src = "CREATE FUNCTION f() RETURNS void AS $$ CREATE TABLE inner_t (id INT); $$ LANGUAGE SQL;\n";
+        let f = SqlAdapter.extract(&pb("fn.sql"), src).unwrap();
+        assert!(
+            f.symbols
+                .iter()
+                .any(|s| s.name == "f" && matches!(s.kind, SymbolKind::Function))
+        );
+        assert!(
+            !f.symbols.iter().any(|s| s.name == "inner_t"),
+            "nested DDL leaked: {:?}",
+            f.symbols
+        );
     }
 }

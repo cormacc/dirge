@@ -116,9 +116,15 @@ fn language_for_path(path: &Path) -> Option<tree_sitter::Language> {
         #[cfg(feature = "semantic-bash")]
         "sh" | "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
 
-        #[cfg(feature = "semantic-sql")]
-        "sql" => Some(tree_sitter_sequel::LANGUAGE.into()),
-
+        // NOTE: `.sql` is deliberately NOT registered here. This gate is a
+        // write-time HARD block (`syntax_gate` → tool error on parse error),
+        // and the generic tree-sitter-sequel grammar reports mainstream,
+        // perfectly valid SQL as ERROR nodes — `CREATE PROCEDURE` (Postgres
+        // 11+/MySQL) and the entire T-SQL dialect (`DECLARE @x`, `GO`) among
+        // them. Blocking those writes leaves the agent unable to save valid
+        // SQL with no recourse. SQL still gets semantic indexing via
+        // `SqlAdapter`, which tolerates parse errors (emits a warning, indexes
+        // what it can) rather than blocking. (dirge follow-up to #516)
         _ => None,
     }
 }
@@ -1046,6 +1052,26 @@ int main(void) {
     fn unknown_extension_skips_silently() {
         let path = PathBuf::from("/tmp/foo.thisisntreal");
         assert!(check_syntax(&path, "(((((").is_ok());
+    }
+
+    #[test]
+    fn sql_writes_are_not_hard_blocked() {
+        // dirge follow-up to #516: `.sql` is intentionally not registered in
+        // the write gate. The generic SQL grammar flags valid mainstream SQL
+        // (CREATE PROCEDURE, T-SQL) as errors; blocking those writes would
+        // strand the agent. These must pass the gate (semantic indexing still
+        // surfaces issues as non-blocking warnings).
+        let path = PathBuf::from("/tmp/proc.sql");
+        assert!(
+            check_syntax(
+                &path,
+                "CREATE PROCEDURE p() LANGUAGE SQL AS $$ SELECT 1; $$;\n"
+            )
+            .is_ok()
+        );
+        assert!(check_syntax(&path, "DECLARE @x INT = 1;\nGO\nSELECT @x;\n").is_ok());
+        // Even a genuinely truncated statement isn't a hard block for SQL.
+        assert!(check_syntax(&path, "CREATE TABLE users (id INT\n").is_ok());
     }
 
     #[test]
