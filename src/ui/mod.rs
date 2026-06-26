@@ -109,6 +109,23 @@ use tool_display::*;
 //     open_rewind_picker / rewind_session                   → ui::search_rewind
 //   - run_shell_command                                     → ui::shell_exec
 
+/// Real user-typed prompt text from `msg`, or `None` for synthetic turns
+/// (non-user roles, system-reminder wrappers, mid-turn steers, and
+/// auto-continue messages) that must never pollute command history.
+fn real_user_prompt(msg: &SessionMessage) -> Option<&str> {
+    if msg.role != MessageRole::User {
+        return None;
+    }
+    let content = strip_leading_system_reminder(&msg.content);
+    if content.is_empty()
+        || content.starts_with("[Mid-turn steer")
+        || content == "Continue based on the background task results above."
+    {
+        return None;
+    }
+    Some(content)
+}
+
 /// Formats a tool call showing only the primary file/command parameter.
 /// - read/write/edit → path
 /// - grep → pattern (and path if both present)
@@ -130,23 +147,6 @@ use tool_display::*;
 /// Cached state for a collapsed tool result, so Ctrl+O can re-render
 /// it as a fresh chamber with the full body. We hold only the last
 /// one — older collapses live in chat history but aren't addressable.
-/// Real user-typed prompt text from `msg`, or `None` for synthetic turns
-/// (non-user roles, system-reminder wrappers, mid-turn steers, and
-/// auto-continue messages) that must never pollute command history.
-fn real_user_prompt(msg: &SessionMessage) -> Option<&str> {
-    if msg.role != MessageRole::User {
-        return None;
-    }
-    let content = strip_leading_system_reminder(&msg.content);
-    if content.is_empty()
-        || content.starts_with("[Mid-turn steer")
-        || content == "Continue based on the background task results above."
-    {
-        return None;
-    }
-    Some(content)
-}
-
 // Interactive entry point — every collaborator (client, agent, CLI,
 // config, session, context, hooks, plugin manager, …) is threaded in
 // explicitly so the TUI loop owns no globals. Refactoring into a
