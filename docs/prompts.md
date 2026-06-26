@@ -51,7 +51,10 @@ the qualified form.
 
 ## Custom prompts
 
-Custom prompts can be placed in `$XDG_CONFIG_HOME/dirge/prompts/` as `.md` files.
+Custom prompts can be placed in `$XDG_CONFIG_HOME/dirge/prompts/` as `.md` files
+(available to every project), and/or in `<project>/.dirge/prompts/` for
+project-local prompts. A project-local prompt with the same stem as a global or
+built-in prompt overrides it.
 
 ## Model-aware steering
 
