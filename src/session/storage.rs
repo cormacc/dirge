@@ -406,6 +406,10 @@ mod tests {
                 .collect();
             let path = dir.join(format!("{id}.json"));
             std::fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
+            // recent_project_sessions ranks by file mtime; sleep so each
+            // seed's write lands a strictly-later mtime regardless of the
+            // filesystem's timestamp granularity.
+            std::thread::sleep(std::time::Duration::from_millis(10));
             id.to_string()
         };
 
@@ -499,6 +503,10 @@ mod tests {
                 serde_json::to_string(&s).unwrap(),
             )
             .unwrap();
+            // recent_project_sessions ranks by file mtime; sleep so each
+            // rotation's write lands a strictly-later mtime (the newest is
+            // the chain tip) regardless of filesystem timestamp granularity.
+            std::thread::sleep(std::time::Duration::from_millis(10));
             id.to_string()
         };
 
@@ -1301,13 +1309,17 @@ pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
 /// keeping the newest command at the tail of history (where Up-arrow
 /// recall starts).
 ///
-/// A cheap partial parse (`ProjMeta`) filters and ranks candidate files
-/// by `working_dir` + `updated_at` before fully deserializing only the
-/// few winners — mirroring `load_session_tip`'s scan so a large session
-/// store isn't loaded wholesale on startup. Fold chains are collapsed by
-/// origin (keeping each conversation's tip, like `find_recent_sessions`),
-/// so `max_sessions` counts distinct prior conversations rather than
-/// rotation files and a folded prior can't seed overlapping prompts.
+/// Candidate files are ordered by filesystem mtime (free from `read_dir`
+/// metadata) and visited newest-first, so only enough files to find the
+/// `max_sessions` most-recent same-project conversations are read — a
+/// large session store isn't loaded wholesale on startup. mtime tracks
+/// `updated_at` (both bumped on every `save_session` write), the same
+/// recency proxy `find_recent_sessions` relies on. A cheap partial parse
+/// (`ProjMeta`) filters by `working_dir` before the few winners are fully
+/// deserialized. Fold chains are collapsed by origin — the first file
+/// seen for an origin is its newest-mtime tip — so `max_sessions` counts
+/// distinct prior conversations, not rotation files, and a folded prior
+/// can't seed overlapping prompts.
 pub fn recent_project_sessions(current: &Session, max_sessions: usize) -> Vec<Session> {
     if max_sessions == 0 {
         return Vec::new();
@@ -1326,18 +1338,37 @@ pub fn recent_project_sessions(current: &Session, max_sessions: usize) -> Vec<Se
         origin_id: Option<String>,
         #[serde(default)]
         working_dir: Option<String>,
-        updated_at: String,
     }
 
-    // Rank same-project, other-origin sessions newest-first via the
-    // cheap partial parse. A vanished or unparseable sibling is skipped
-    // rather than aborting the whole scan (concurrent fold/cleanup can
-    // delete or rewrite a file mid-iteration).
-    let mut ranked: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+    // Order by mtime newest-first using only the directory metadata — no
+    // file content read yet.
+    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        files.push((path, mtime));
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
+
+    // Walk newest-first, partial-parsing only until the `max_sessions`
+    // most-recent same-project conversations are found. Pre-seeding `seen`
+    // with the current origin skips the current session's own fold chain;
+    // the first file seen for any other origin is its tip, so the set also
+    // collapses rotations. A vanished or unparseable sibling is skipped
+    // rather than aborting (concurrent fold/cleanup can rewrite a file
+    // mid-scan).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(current_origin.to_string());
+    let mut picked: Vec<std::path::PathBuf> = Vec::new();
+    for (path, _) in files {
+        if picked.len() == max_sessions {
+            break;
         }
         let Ok(json) = std::fs::read_to_string(&path) else {
             continue;
@@ -1349,25 +1380,17 @@ pub fn recent_project_sessions(current: &Session, max_sessions: usize) -> Vec<Se
             continue;
         }
         let origin = meta.origin_id.unwrap_or(meta.id);
-        if origin == current_origin {
+        if !seen.insert(origin) {
             continue;
         }
-        ranked.push((meta.updated_at, origin, path));
+        picked.push(path);
     }
-    ranked.sort_by(|a, b| b.0.cmp(&a.0));
-    // Collapse fold chains: keep only the newest file per origin (its
-    // tip) so a folded prior conversation occupies one slot, not one per
-    // rotation. Dedup before truncating so `max_sessions` bounds distinct
-    // conversations.
-    let mut seen = std::collections::HashSet::new();
-    ranked.retain(|(_, origin, _)| seen.insert(origin.clone()));
-    ranked.truncate(max_sessions);
     // Oldest-first: appending then yields oldest-session prompts first,
     // so the newest prior session sits just behind the current session.
-    ranked.reverse();
+    picked.reverse();
 
-    let mut out = Vec::with_capacity(ranked.len());
-    for (_, _, path) in ranked {
+    let mut out = Vec::with_capacity(picked.len());
+    for path in picked {
         if let Ok(json) = std::fs::read_to_string(&path)
             && let Ok(session) = serde_json::from_str::<Session>(&json)
         {
