@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-06-26
+
+### Added
+- **Cross-session command history.** Up/Down and Ctrl+F recall now seed from the
+  most-recent prior sessions in the same project, not just the current one — so a
+  fresh session in a project starts with your earlier prompts already in history
+  instead of an empty pool. The new top-level `max_sessions` config (default `3`)
+  caps how many prior sessions are mined; set `0` to keep recall scoped to the
+  current session. Prior prompts are seeded oldest-first ahead of the current
+  session's own, so Up still starts from your newest command and walks back.
+  Compaction-fold rotations are collapsed so one conversation counts once, and
+  synthetic turns (system-reminder wrappers, mid-turn steers, auto-continues)
+  never enter history. (#527, #528; thanks @nikolap)
+
 ## [0.13.1] - 2026-06-26
 
 ### Fixed
